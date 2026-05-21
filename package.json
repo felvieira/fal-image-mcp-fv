@@ -1,0 +1,46 @@
+{
+  "name": "fal-image-mcp-fv",
+  "version": "0.1.0",
+  "description": "Remote MCP server for fal.ai image models — curated favorites, dynamic catalog search, per-call cost tracking",
+  "license": "MIT",
+  "author": "Felipe Vieira (@felvieira)",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/felvieira/fal-image-mcp-fv.git"
+  },
+  "homepage": "https://github.com/felvieira/fal-image-mcp-fv#readme",
+  "bugs": {
+    "url": "https://github.com/felvieira/fal-image-mcp-fv/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "fal",
+    "fal-ai",
+    "image-generation",
+    "claude",
+    "anthropic",
+    "vercel"
+  ],
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "@vercel/mcp-adapter": "^0.11.1",
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "next": "^15.1.3",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "@types/react": "^19.0.2",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

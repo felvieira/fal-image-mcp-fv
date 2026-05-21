@@ -1,0 +1,334 @@
+{
+  "$schema": "./models.schema.json",
+  "version": "2026-05-04",
+  "provider": "fal.ai",
+  "queue_base_url": "https://queue.fal.run",
+  "sync_base_url": "https://fal.run",
+  "default": "gpt-image-2",
+  "models": {
+    "grok-imagine": {
+      "id": "grok-imagine",
+      "name": "Grok Imagine",
+      "vendor": "xai",
+      "endpoints": {
+        "t2i": "xai/grok-imagine-image",
+        "edit": "xai/grok-imagine-image/edit"
+      },
+      "pricing": {
+        "t2i_usd_per_image": 0.020,
+        "edit_usd_per_image": 0.022,
+        "notes": "edit = 0.020 output + 0.002 input"
+      },
+      "tier": "$",
+      "use_cases": ["criativos esteticos baratos e simples", "social posts rapidos", "iteracao alta"],
+      "supports": {
+        "t2i": true,
+        "edit": true,
+        "aspect_ratios": ["2:1", "20:9", "19.5:9", "16:9", "4:3", "3:2", "1:1", "2:3", "3:4", "9:16", "9:19.5", "9:20", "1:2"],
+        "max_reference_images": 1,
+        "negative_prompt": false,
+        "quality_tiers": false
+      },
+      "default_params": {
+        "num_images": 1,
+        "aspect_ratio": "1:1",
+        "output_format": "jpeg"
+      },
+      "docs": "https://fal.ai/models/xai/grok-imagine-image"
+    },
+
+    "gemini-25-flash": {
+      "id": "gemini-25-flash",
+      "name": "Gemini 2.5 Flash Image",
+      "vendor": "google",
+      "endpoints": {
+        "t2i": "fal-ai/gemini-25-flash-image",
+        "edit": "fal-ai/gemini-25-flash-image/edit"
+      },
+      "pricing": {
+        "t2i_usd_per_image": 0.039,
+        "edit_usd_per_image": 0.039,
+        "notes": "$1.00 = 25 imagens"
+      },
+      "tier": "$",
+      "use_cases": ["custo fixo previsivel para producao em escala", "default geral", "hero/onboarding/OG cards"],
+      "supports": {
+        "t2i": true,
+        "edit": true,
+        "aspect_ratios": ["21:9", "16:9", "3:2", "4:3", "5:4", "1:1", "4:5", "3:4", "2:3", "9:16"],
+        "max_reference_images": 4,
+        "negative_prompt": false,
+        "quality_tiers": false
+      },
+      "default_params": {
+        "num_images": 1,
+        "aspect_ratio": "1:1",
+        "output_format": "png",
+        "safety_tolerance": "4"
+      },
+      "docs": "https://fal.ai/models/fal-ai/gemini-25-flash-image"
+    },
+
+    "gpt-image-1-mini": {
+      "id": "gpt-image-1-mini",
+      "name": "GPT Image 1 Mini",
+      "vendor": "openai",
+      "endpoints": {
+        "t2i": "fal-ai/gpt-image-1-mini",
+        "edit": "fal-ai/gpt-image-1-mini/edit"
+      },
+      "pricing": {
+        "t2i_usd_per_image": {
+          "low_1024": 0.005,
+          "low_other": 0.006,
+          "medium_1024": 0.011,
+          "medium_other": 0.015,
+          "high_1024": 0.036,
+          "high_other": 0.052,
+          "input_text_per_1k_tokens": 0.002
+        },
+        "edit_usd_per_image": {
+          "input_image_per_1k_tokens": 0.0025,
+          "low_1024": 0.005,
+          "medium_1024": 0.011,
+          "high_1024": 0.036
+        },
+        "notes": "preco varia por quality (low/medium/high) e size; arredondado pro centavo mais proximo"
+      },
+      "tier": "$",
+      "use_cases": ["muita imagem barata em low quality", "iteracao em massa", "thumbnails"],
+      "supports": {
+        "t2i": true,
+        "edit": true,
+        "aspect_ratios": [],
+        "image_sizes": ["auto", "1024x1024", "1536x1024", "1024x1536"],
+        "max_reference_images": 4,
+        "negative_prompt": false,
+        "quality_tiers": true,
+        "qualities": ["auto", "low", "medium", "high"]
+      },
+      "default_params": {
+        "num_images": 1,
+        "image_size": "1024x1024",
+        "quality": "low",
+        "background": "auto",
+        "output_format": "png"
+      },
+      "docs": "https://fal.ai/models/fal-ai/gpt-image-1-mini"
+    },
+
+    "gpt-image-1.5": {
+      "id": "gpt-image-1.5",
+      "name": "GPT Image 1.5",
+      "vendor": "openai",
+      "endpoints": {
+        "t2i": "fal-ai/gpt-image-1.5",
+        "edit": "fal-ai/gpt-image-1.5/edit"
+      },
+      "pricing": {
+        "t2i_usd_per_image": {
+          "low_1024": 0.009,
+          "low_other": 0.013,
+          "medium_1024": 0.034,
+          "medium_1024x1536": 0.051,
+          "medium_1536x1024": 0.050,
+          "high_1024": 0.133,
+          "high_1024x1536": 0.200,
+          "high_1536x1024": 0.199,
+          "input_text_per_1k_tokens": 0.005,
+          "output_text_per_1k_tokens": 0.010
+        },
+        "edit_usd_per_image": {
+          "input_image_per_1k_tokens_low_fidelity": 0.008,
+          "input_image_per_1k_tokens_high_fidelity": 0.008,
+          "low_1024": 0.009,
+          "medium_1024": 0.034,
+          "high_1024": 0.133
+        },
+        "notes": "preco mais caro pro acabamento de alta fidelidade; bom para tipografia e composicao complexa"
+      },
+      "tier": "$$$",
+      "use_cases": ["acabamento high fidelity", "OG cards finalizados", "lookbook capa", "posters"],
+      "supports": {
+        "t2i": true,
+        "edit": true,
+        "image_sizes": ["auto", "1024x1024", "1536x1024", "1024x1536"],
+        "max_reference_images": 4,
+        "negative_prompt": false,
+        "quality_tiers": true,
+        "qualities": ["low", "medium", "high"]
+      },
+      "default_params": {
+        "num_images": 1,
+        "image_size": "1024x1024",
+        "quality": "high",
+        "background": "auto",
+        "output_format": "png"
+      },
+      "docs": "https://fal.ai/models/fal-ai/gpt-image-1.5"
+    },
+
+    "gpt-image-1": {
+      "id": "gpt-image-1",
+      "name": "GPT Image 1 (legacy)",
+      "vendor": "openai",
+      "endpoints": {
+        "t2i": "fal-ai/gpt-image-1/text-to-image",
+        "edit": "fal-ai/gpt-image-1/edit-image"
+      },
+      "pricing": {
+        "t2i_usd_per_image": {
+          "low_1024": 0.011,
+          "low_other": 0.016,
+          "medium_1024": 0.042,
+          "medium_other": 0.063,
+          "high_1024": 0.167,
+          "high_other": 0.250,
+          "input_text_per_1k_tokens": 0.002
+        },
+        "edit_usd_per_image": {
+          "low_1024": 0.011,
+          "medium_1024": 0.042,
+          "high_1024": 0.167,
+          "input_image_per_1k_tokens": 0.005
+        },
+        "notes": "versao legada, prefira gpt-image-1.5 ou gpt-image-1-mini"
+      },
+      "tier": "$$$",
+      "use_cases": ["fallback quando 1.5 indisponivel"],
+      "supports": {
+        "t2i": true,
+        "edit": true,
+        "image_sizes": ["auto", "1024x1024", "1536x1024", "1024x1536"],
+        "max_reference_images": 1,
+        "negative_prompt": false,
+        "quality_tiers": true
+      },
+      "default_params": {
+        "num_images": 1,
+        "image_size": "1024x1024",
+        "quality": "auto",
+        "output_format": "png"
+      },
+      "docs": "https://fal.ai/models/fal-ai/gpt-image-1/text-to-image"
+    },
+
+    "gpt-image-2": {
+      "id": "gpt-image-2",
+      "name": "GPT Image 2",
+      "vendor": "openai",
+      "endpoints": {
+        "t2i": "openai/gpt-image-2"
+      },
+      "pricing": {
+        "t2i_usd_per_image": {
+          "low_1024x768": 0.005,
+          "low_1024x1024": 0.006,
+          "low_1024x1536": 0.005,
+          "low_1920x1080": 0.005,
+          "low_2560x1440": 0.007,
+          "low_3840x2160": 0.012,
+          "medium_1024x768": 0.037,
+          "medium_1024x1024": 0.053,
+          "medium_1024x1536": 0.042,
+          "medium_1920x1080": 0.040,
+          "medium_2560x1440": 0.056,
+          "medium_3840x2160": 0.101,
+          "high_1024x768": 0.145,
+          "high_1024x1024": 0.211,
+          "high_1024x1536": 0.165,
+          "high_1920x1080": 0.158,
+          "high_2560x1440": 0.222,
+          "high_3840x2160": 0.401,
+          "text_tokens_per_1m_input": 5.00,
+          "text_tokens_per_1m_cached": 1.25,
+          "text_tokens_per_1m_output": 10.00,
+          "image_tokens_per_1m_input": 8.00,
+          "image_tokens_per_1m_cached": 2.00,
+          "image_tokens_per_1m_output": 30.00
+        },
+        "notes": "quality=high por padrao; preco sobe muito com resolucao alta e quality=high; tipografia de alta qualidade"
+      },
+      "tier": "$$$",
+      "use_cases": ["tipografia fina e detalhada", "imagens fotorrealistas premium", "composicao complexa com texto", "alta resolucao"],
+      "supports": {
+        "t2i": true,
+        "edit": false,
+        "image_sizes": ["landscape_4_3", "portrait_3_4", "square_1_1", "landscape_16_9", "portrait_9_16"],
+        "custom_size": true,
+        "max_custom_edge_px": 3840,
+        "max_reference_images": 0,
+        "negative_prompt": false,
+        "quality_tiers": true,
+        "qualities": ["low", "medium", "high"],
+        "output_formats": ["jpeg", "png", "webp"],
+        "num_images_max": 4
+      },
+      "default_params": {
+        "num_images": 1,
+        "image_size": "square_1_1",
+        "quality": "medium",
+        "output_format": "png"
+      },
+      "docs": "https://fal.ai/models/openai/gpt-image-2"
+    },
+
+    "gemini-3-pro": {
+      "id": "gemini-3-pro",
+      "name": "Gemini 3 Pro Image Preview (Nano Banana Pro)",
+      "vendor": "google",
+      "endpoints": {
+        "t2i": "fal-ai/gemini-3-pro-image-preview",
+        "edit": "fal-ai/gemini-3-pro-image-preview/edit"
+      },
+      "pricing": {
+        "t2i_usd_per_image": 0.15,
+        "edit_usd_per_image": 0.15,
+        "notes": "$1 = ~7 imagens; 4K dobra o preco"
+      },
+      "tier": "$$$",
+      "use_cases": ["prompt dificil", "tipografia complexa", "composicao com texto/layout precisos", "realismo top"],
+      "supports": {
+        "t2i": true,
+        "edit": true,
+        "aspect_ratios": ["auto", "21:9", "16:9", "3:2", "4:3", "5:4", "1:1", "4:5", "3:4", "2:3", "9:16"],
+        "max_reference_images": 1,
+        "negative_prompt": false,
+        "quality_tiers": false,
+        "resolution_tiers": ["1K", "2K", "4K"]
+      },
+      "default_params": {
+        "num_images": 1,
+        "aspect_ratio": "1:1",
+        "resolution": "1K",
+        "output_format": "png",
+        "safety_tolerance": "4"
+      },
+      "docs": "https://fal.ai/models/fal-ai/gemini-3-pro-image-preview"
+    }
+  },
+
+  "use_case_routing": {
+    "muita_imagem_barata": "gpt-image-1-mini",
+    "custo_fixo_producao_escala": "gemini-25-flash",
+    "prompt_dificil_tipografia": "gemini-3-pro",
+    "acabamento_high_fidelity": "gpt-image-1.5",
+    "criativos_esteticos_baratos": "grok-imagine",
+    "tipografia_fina_premium": "gpt-image-2",
+    "fallback_legacy": "gpt-image-1"
+  },
+
+  "common_aspect_ratios": {
+    "vertical_9_16": "9:16",
+    "horizontal_16_9": "16:9",
+    "square_1_1": "1:1",
+    "portrait_3_4": "3:4",
+    "landscape_4_3": "4:3"
+  },
+
+  "auth": {
+    "header": "Authorization: Key $FAL_AI_API_KEY",
+    "env_var": "FAL_AI_API_KEY",
+    "fallback_env_vars": ["FAL_KEY", "FAL_API_KEY"]
+  }
+}

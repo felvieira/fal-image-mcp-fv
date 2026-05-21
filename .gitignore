@@ -1,0 +1,18 @@
+node_modules
+.next
+out
+.env
+.env.local
+.env.*.local
+.vercel
+*.log
+.DS_Store
+.idea
+.vscode
+
+# Claude Code / session metadata
+.auto/
+.bot/
+.swarm/
+.claude/
+graphify-out/
