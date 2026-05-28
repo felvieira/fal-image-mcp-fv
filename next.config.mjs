@@ -1,8 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  experimental: {
-    serverComponentsExternalPackages: ["@modelcontextprotocol/sdk"],
-  },
+  // Renamed from experimental.serverComponentsExternalPackages in Next 15.
+  serverExternalPackages: ["@modelcontextprotocol/sdk"],
 };
 
 export default nextConfig;

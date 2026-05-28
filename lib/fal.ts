@@ -8,18 +8,85 @@ import { config } from "./models";
 // Docs: https://fal.ai/docs/documentation/model-apis/inference-methods
 // ============================================================
 
-const FAL_KEY = process.env.FAL_KEY;
-if (!FAL_KEY) {
-  console.warn("[fal-mcp] FAL_KEY não configurada nas env vars.");
-}
-
 const QUEUE_BASE = config.queue_base_url; // https://queue.fal.run
 const SYNC_BASE = config.sync_base_url;   // https://fal.run
 
+/** Resolve a FAL_KEY das env vars suportadas (sem lançar). */
+function resolveFalKey(): string | undefined {
+  return (
+    process.env.FAL_KEY ??
+    process.env.FAL_AI_API_KEY ??
+    process.env.FAL_API_KEY
+  );
+}
+
+/** True se há FAL_KEY configurada em runtime — usado pra fail-fast claro. */
+function hasFalKey(): boolean {
+  return Boolean(resolveFalKey());
+}
+
+/** Lê FAL_KEY em runtime (lazy) — falha rápido se ausente na chamada, não no boot. */
+function getFalKey(): string {
+  const key = resolveFalKey();
+  if (!key) {
+    throw new Error("FAL_KEY not configured on the server");
+  }
+  return key;
+}
+
 const AUTH_HEADER = () => ({
-  Authorization: `Key ${FAL_KEY}`,
+  Authorization: `Key ${getFalKey()}`,
   "Content-Type": "application/json",
 });
+
+// ============================================================
+// Anti-SSRF: valida o endpoint controlado pelo usuário
+// ============================================================
+// O `endpoint` vem da tool do MCP (endpoint_id arbitrário). Sem validação,
+// um valor como `../../foo`, uma URL absoluta ou path traversal poderia
+// escapar do host do fal. Exige um path relativo do fal, ex:
+//   `fal-ai/flux/dev`, `xai/grok-imagine-image`, `openai/gpt-image-2`,
+//   `fal-ai/nano-banana/edit`, `.../text-to-image`.
+// ============================================================
+
+export function assertValidEndpoint(endpoint: string): void {
+  if (!endpoint) {
+    throw new Error("[fal-mcp] endpoint inválido: vazio.");
+  }
+  // path traversal
+  if (endpoint.includes("..")) {
+    throw new Error("[fal-mcp] endpoint inválido: contém '..'.");
+  }
+  // sem scheme (http://, https://, etc.) — deve ser path relativo
+  if (endpoint.includes("://")) {
+    throw new Error("[fal-mcp] endpoint inválido: não pode conter um scheme (://).");
+  }
+  // sem barra inicial — evita duplicação de host e URLs absolutas de path
+  if (endpoint.startsWith("/")) {
+    throw new Error("[fal-mcp] endpoint inválido: não pode começar com '/'.");
+  }
+  // apenas caracteres seguros — barras internas e sufixos como /edit são ok
+  if (!/^[A-Za-z0-9/_.-]+$/.test(endpoint)) {
+    throw new Error(
+      "[fal-mcp] endpoint inválido: apenas [A-Za-z0-9/_.-] são permitidos."
+    );
+  }
+}
+
+// ============================================================
+// Sanitiza corpos de erro vindos do upstream (fal)
+// ============================================================
+// Evita vazar tokens/keys e respostas gigantes pro cliente do MCP.
+// Trunca em 500 chars e redige qualquer coisa parecida com bearer/key token.
+// ============================================================
+
+export function safeErrBody(text: string): string {
+  if (!text) return "";
+  const redacted = text
+    .replace(/Key\s+[A-Za-z0-9_-]+/g, "[redacted]")
+    .replace(/Bearer\s+[A-Za-z0-9._-]+/g, "[redacted]");
+  return redacted.length > 500 ? `${redacted.slice(0, 500)}…` : redacted;
+}
 
 // ============================================================
 // Subscribe (síncrono — submete + polla até pronto)
@@ -37,12 +104,19 @@ export async function falSubscribe(
   input: Record<string, unknown>,
   opts: { pollIntervalMs?: number; timeoutMs?: number } = {}
 ): Promise<{ data: FalSubscribeResult; request_id: string; logs: string[] }> {
+  // 0. Valida o endpoint (anti-SSRF) e a key ANTES de qualquer fetch —
+  //    falha rápido e com mensagem clara em vez de um erro críptico depois.
+  assertValidEndpoint(endpoint);
+  if (!hasFalKey()) {
+    throw new Error("FAL_KEY not configured on the server");
+  }
+
   const pollInterval = opts.pollIntervalMs ?? 1500;
   const timeout = opts.timeoutMs ?? 180_000; // 3min
   const started = Date.now();
   const logs: string[] = [];
 
-  // 1. Submete pro queue
+  // 1. Submete pro queue — endpoint já validado, sem barra inicial duplicada
   const submitUrl = `${QUEUE_BASE}/${endpoint}`;
   const submitRes = await fetch(submitUrl, {
     method: "POST",
@@ -52,7 +126,7 @@ export async function falSubscribe(
 
   if (!submitRes.ok) {
     const errText = await submitRes.text();
-    throw new Error(`fal submit failed (${submitRes.status}): ${errText}`);
+    throw new Error(`fal submit failed (${submitRes.status}): ${safeErrBody(errText)}`);
   }
 
   const submitJson = (await submitRes.json()) as { request_id: string; status_url: string; response_url: string };
@@ -66,7 +140,7 @@ export async function falSubscribe(
     const statusRes = await fetch(status_url, { headers: AUTH_HEADER() });
     if (!statusRes.ok) {
       const errText = await statusRes.text();
-      throw new Error(`fal status failed (${statusRes.status}): ${errText}`);
+      throw new Error(`fal status failed (${statusRes.status}): ${safeErrBody(errText)}`);
     }
     const status = (await statusRes.json()) as { status: string; logs?: { message: string }[] };
     if (status.logs?.length) logs.push(...status.logs.map((l) => l.message));
@@ -75,14 +149,14 @@ export async function falSubscribe(
       const dataRes = await fetch(response_url, { headers: AUTH_HEADER() });
       if (!dataRes.ok) {
         const errText = await dataRes.text();
-        throw new Error(`fal result fetch failed (${dataRes.status}): ${errText}`);
+        throw new Error(`fal result fetch failed (${dataRes.status}): ${safeErrBody(errText)}`);
       }
       const data = (await dataRes.json()) as FalSubscribeResult;
       return { data, request_id, logs };
     }
 
     if (status.status === "FAILED" || status.status === "ERROR") {
-      throw new Error(`fal job failed: ${JSON.stringify(status)}`);
+      throw new Error(`fal job failed: ${safeErrBody(JSON.stringify(status))}`);
     }
   }
 
@@ -99,14 +173,10 @@ export function extractImageUrls(data: FalSubscribeResult): string[] {
   }
   if (data.image?.url) return [data.image.url];
   if (Array.isArray(data.output_images)) return data.output_images;
-  // fallback heurístico — procura qualquer .url em campos top-level
-  const out: string[] = [];
-  for (const v of Object.values(data)) {
-    if (typeof v === "object" && v && "url" in v && typeof (v as any).url === "string") {
-      out.push((v as any).url);
-    }
-  }
-  return out;
+  // Apenas formatos conhecidos acima. Sem fallback heurístico: varrer todos
+  // os campos top-level atrás de qualquer .url pega a URL errada (ex:
+  // request.url, seed_url). Se nada bater, retorna vazio em vez de adivinhar.
+  return [];
 }
 
 // ============================================================
@@ -123,6 +193,11 @@ export type FalCatalogModel = {
 };
 
 export async function listFalCatalog(category?: string, limit = 30): Promise<FalCatalogModel[]> {
+  // Fail-fast claro: a catalog API também precisa da key. Lança ANTES do
+  // try/catch pra não ser engolido pelo fallback que retorna [].
+  if (!hasFalKey()) {
+    throw new Error("FAL_KEY not configured on the server");
+  }
   try {
     const url = new URL("https://fal.ai/api/models");
     if (category) url.searchParams.set("category", category);

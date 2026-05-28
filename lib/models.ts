@@ -14,6 +14,9 @@ export type ModelEndpoints = {
 export type ModelPricing = {
   t2i_usd_per_image?: number | Record<string, number>;
   edit_usd_per_image?: number | Record<string, number>;
+  /** Preço por megapixel — usado por modelos como flux-2-flash ($0.005/MP) */
+  t2i_usd_per_megapixel?: number;
+  edit_usd_per_megapixel?: number;
   notes?: string;
 };
 
@@ -52,6 +55,8 @@ export type ModelsConfig = {
   queue_base_url: string;
   sync_base_url: string;
   default: ModelId;
+  default_text_to_image?: ModelId;
+  default_edit_image?: ModelId;
   models: Record<ModelId, FavoriteModel>;
   use_case_routing: Record<string, ModelId>;
   common_aspect_ratios: Record<string, string>;
@@ -90,11 +95,17 @@ export function formatFavoritesList(mode: "t2i" | "edit" | "all" = "all"): strin
   const list = listFavorites(mode);
   return list
     .map((m) => {
-      const p = m.pricing.t2i_usd_per_image;
-      const priceStr =
-        typeof p === "number"
-          ? `~$${p.toFixed(3)}/img`
-          : "preço variável (por size/quality)";
+      // Suporta: flat/img, por megapixel, tabela complexa
+      let priceStr: string;
+      const mp = m.pricing.t2i_usd_per_megapixel;
+      const flat = m.pricing.t2i_usd_per_image;
+      if (typeof mp === "number") {
+        priceStr = `$${mp.toFixed(4)}/MP (~$${(mp * 1.05).toFixed(4)}/1024²)`;
+      } else if (typeof flat === "number") {
+        priceStr = `~$${flat.toFixed(3)}/img`;
+      } else {
+        priceStr = "preço variável (por size/quality)";
+      }
       const caps = [
         m.supports.t2i ? "t2i" : null,
         m.supports.edit ? "edit" : null,

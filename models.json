@@ -1,11 +1,57 @@
 {
   "$schema": "./models.schema.json",
-  "version": "2026-05-04",
+  "version": "2026-05-28",
   "provider": "fal.ai",
   "queue_base_url": "https://queue.fal.run",
   "sync_base_url": "https://fal.run",
-  "default": "gpt-image-2",
+  "default": "gemini-25-flash",
+  "default_text_to_image": "flux-2-flash",
+  "default_edit_image": "gemini-25-flash",
   "models": {
+    "flux-2-flash": {
+      "id": "flux-2-flash",
+      "name": "FLUX.2 Flash",
+      "vendor": "black-forest-labs",
+      "endpoints": {
+        "t2i": "fal-ai/flux-2/flash"
+      },
+      "pricing": {
+        "t2i_usd_per_megapixel": 0.005,
+        "examples": {
+          "800x450_(0.36MP)": 0.0018,
+          "1024x1024_(1.05MP)": 0.00524,
+          "1536x1024_(1.57MP)": 0.00786,
+          "2048x1152_(2.36MP)": 0.0118
+        },
+        "notes": "preco por MEGAPIXEL, nao por imagem. Imagens pequenas (800x450) custam $0.0018 — ~11x mais barato que grok-imagine."
+      },
+      "tier": "$",
+      "use_cases": ["thumbnails baratas em escala", "capa de card de feed", "OG cards 1200x630", "iteracao em massa text-to-image"],
+      "supports": {
+        "t2i": true,
+        "edit": false,
+        "image_sizes": ["square_hd", "square", "portrait_4_3", "portrait_16_9", "landscape_4_3", "landscape_16_9"],
+        "custom_size": true,
+        "min_edge_px": 512,
+        "max_edge_px": 2048,
+        "max_reference_images": 0,
+        "negative_prompt": false,
+        "quality_tiers": false,
+        "guidance_scale_range": [0, 20],
+        "guidance_scale_default": 2.5,
+        "num_images_max": 4,
+        "prompt_expansion": true
+      },
+      "default_params": {
+        "num_images": 1,
+        "image_size": "landscape_4_3",
+        "guidance_scale": 2.5,
+        "output_format": "jpeg",
+        "enable_safety_checker": true
+      },
+      "docs": "https://fal.ai/models/fal-ai/flux-2/flash"
+    },
+
     "grok-imagine": {
       "id": "grok-imagine",
       "name": "Grok Imagine",
@@ -309,12 +355,16 @@
   },
 
   "use_case_routing": {
-    "muita_imagem_barata": "gpt-image-1-mini",
+    "_REGRA_CANONICA": "text-to-image (sem ref) = flux-2-flash ($0.005/MP). edit/refine com ref = gemini-25-flash ($0.039). Subir tier apenas se prompt exigir tipografia/fotorrealismo.",
+    "text_to_image_DEFAULT": "flux-2-flash",
+    "edit_image_DEFAULT": "gemini-25-flash",
+    "muita_imagem_barata": "flux-2-flash",
     "custo_fixo_producao_escala": "gemini-25-flash",
     "prompt_dificil_tipografia": "gemini-3-pro",
     "acabamento_high_fidelity": "gpt-image-1.5",
-    "criativos_esteticos_baratos": "grok-imagine",
+    "criativos_esteticos_baratos": "flux-2-flash",
     "tipografia_fina_premium": "gpt-image-2",
+    "fallback_custo_fixo_t2i": "grok-imagine",
     "fallback_legacy": "gpt-image-1"
   },
 
@@ -327,8 +377,8 @@
   },
 
   "auth": {
-    "header": "Authorization: Key $FAL_AI_API_KEY",
-    "env_var": "FAL_AI_API_KEY",
-    "fallback_env_vars": ["FAL_KEY", "FAL_API_KEY"]
+    "header": "Authorization: Key $FAL_KEY",
+    "env_var": "FAL_KEY",
+    "fallback_env_vars": ["FAL_AI_API_KEY", "FAL_API_KEY"]
   }
 }

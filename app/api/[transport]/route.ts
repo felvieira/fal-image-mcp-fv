@@ -1,4 +1,6 @@
 import { createMcpHandler } from "@vercel/mcp-adapter";
+import { AsyncLocalStorage } from "async_hooks";
+import { createHash } from "crypto";
 import { z } from "zod";
 import {
   FAVORITES,
@@ -8,21 +10,109 @@ import {
   formatFavoritesList,
   config as modelsConfig,
 } from "@/lib/models";
-import { calculateCost, tracker } from "@/lib/pricing";
-import { falSubscribe, extractImageUrls, listFalCatalog } from "@/lib/fal";
+import { calculateCost, getTracker } from "@/lib/pricing";
+import { falSubscribe, extractImageUrls, listFalCatalog, assertValidEndpoint } from "@/lib/fal";
+import { withAuth } from "@/lib/auth";
 
 // ============================================================
-// Auth helper — Bearer token simples
+// Per-session context
 // ============================================================
-function checkAuth(req: Request): void {
-  const expected = process.env.MCP_BEARER_TOKEN;
-  if (!expected) return; // se não configurou token, libera (útil em dev)
+// server.tool callbacks don't receive the raw Request, so they can't read a
+// session id directly. We stash it in AsyncLocalStorage in the HTTP handler
+// wrapper and read it back inside the tools (cost tracking is per-session).
+// ============================================================
+
+const sessionCtx = new AsyncLocalStorage<{ sessionId: string }>();
+
+/**
+ * Derives a stable session id from the request:
+ *   1. `mcp-session-id` header if present (the MCP transport sets this)
+ *   2. otherwise a sha256 hash of the `authorization` header (per-token bucket)
+ *   3. otherwise the literal "anon"
+ */
+function sessionIdFromReq(req: Request): string {
+  const explicit = req.headers.get("mcp-session-id");
+  if (explicit) return explicit;
+
   const auth = req.headers.get("authorization");
-  if (!auth || !auth.startsWith("Bearer ")) {
-    throw new Error("Unauthorized — falta header Authorization: Bearer ...");
+  if (auth) return createHash("sha256").update(auth, "utf8").digest("hex");
+
+  return "anon";
+}
+
+/** Resolves the SessionTracker for the current AsyncLocalStorage context. */
+function currentTracker() {
+  const sessionId = sessionCtx.getStore()?.sessionId ?? "anon";
+  return getTracker(sessionId);
+}
+
+// ============================================================
+// DRY helpers — shared by fal_generate_image and fal_edit_image
+// ============================================================
+
+type FavModel = typeof FAVORITES[string];
+
+/** Builds the base fal payload, merging the model's default params. */
+function buildFalInput(
+  prompt: string,
+  num_images: number,
+  modelDef: FavModel | null,
+  opts: {
+    aspect_ratio?: string;
+    image_size?: string;
+    quality?: string;
+    output_format?: string;
+    extra_params?: Record<string, unknown>;
   }
-  const token = auth.replace("Bearer ", "").trim();
-  if (token !== expected) throw new Error("Unauthorized — token inválido");
+): Record<string, unknown> {
+  const input: Record<string, unknown> = { prompt, num_images };
+  if (opts.aspect_ratio) input.aspect_ratio = opts.aspect_ratio;
+  if (opts.image_size) input.image_size = opts.image_size;
+  if (opts.quality) input.quality = opts.quality;
+  if (opts.output_format) input.output_format = opts.output_format;
+  // Merge model defaults (without overwriting anything already set)
+  if (modelDef?.default_params) {
+    for (const [k, v] of Object.entries(modelDef.default_params)) {
+      if (input[k] == null) input[k] = v;
+    }
+  }
+  // Explicit caller overrides win
+  if (opts.extra_params) Object.assign(input, opts.extra_params);
+  return input;
+}
+
+/** Computes cost, records it on the per-session tracker, returns a formatted string. */
+function recordAndFormatCost(
+  modelDef: FavModel | null,
+  mode: "t2i" | "edit",
+  num_images: number,
+  input: Record<string, unknown>
+): string {
+  if (!modelDef) return "Cost: unavailable (model is outside the favorites list)";
+  const cost = calculateCost({
+    model: modelDef,
+    mode,
+    num_images,
+    quality: typeof input.quality === "string" ? input.quality : undefined,
+    image_size: typeof input.image_size === "string" ? input.image_size : undefined,
+  });
+  const tracker = currentTracker();
+  tracker.record(modelDef.id, mode, num_images, cost);
+  return (
+    `💰 Cost: $${cost.total_usd.toFixed(4)} ` +
+    `($${cost.per_image_usd.toFixed(4)}/img × ${num_images}, key=${cost.pricing_key})\n` +
+    `   Session: $${tracker.total.toFixed(4)} (${tracker.calls.length} calls)`
+  );
+}
+
+/** Infers an image MIME type from the URL extension, defaulting to image/png. */
+function mimeFromUrl(url: string): string {
+  const clean = url.split(/[?#]/)[0].toLowerCase();
+  if (clean.endsWith(".jpg") || clean.endsWith(".jpeg")) return "image/jpeg";
+  if (clean.endsWith(".png")) return "image/png";
+  if (clean.endsWith(".webp")) return "image/webp";
+  if (clean.endsWith(".gif")) return "image/gif";
+  return "image/png";
 }
 
 // ============================================================
@@ -32,21 +122,21 @@ function checkAuth(req: Request): void {
 const handler = createMcpHandler(
   (server) => {
     // -------------------------------------------------------
-    // TOOL 1: Listar modelos (favoritos + catálogo do fal)
+    // TOOL 1: List models (favorites + fal catalog)
     // -------------------------------------------------------
     server.tool(
       "fal_list_models",
-      "Lista os modelos disponíveis. Mostra primeiro os FAVORITOS (do models.json do Felipe), depois opcionalmente busca mais no catálogo do fal. Filtra por modo (t2i, edit ou ambos).",
+      "Lists the available image models. Shows the FAVORITES first (from the curated models.json), then optionally fetches more from the public fal.ai catalog. Filter by mode (t2i, edit, or all).",
       {
         mode: z
           .enum(["t2i", "edit", "all"])
           .default("all")
-          .describe("Filtra por capacidade: 't2i' = só text-to-image, 'edit' = só image-to-image/edit, 'all' = todos"),
+          .describe("Filter by capability: 't2i' = text-to-image only, 'edit' = image-to-image/edit only, 'all' = everything"),
         include_fal_catalog: z
           .boolean()
           .default(false)
-          .describe("Se true, busca modelos adicionais no catálogo público do fal.ai (mais lento)"),
-        catalog_limit: z.number().min(1).max(50).default(15).describe("Quantos modelos extras buscar no catálogo do fal"),
+          .describe("If true, also fetch additional models from the public fal.ai catalog (slower)"),
+        catalog_limit: z.number().min(1).max(50).default(15).describe("How many extra models to fetch from the fal catalog"),
       },
       async ({ mode, include_fal_catalog, catalog_limit }) => {
         const favLines = formatFavoritesList(mode);
@@ -69,7 +159,7 @@ const handler = createMcpHandler(
               for (const m of list) all.push(`  ${m.endpoint_id} — ${m.name}`);
             }
           }
-          extras = all.length ? `\n\n📚 Catálogo público do fal:${all.join("\n")}` : "\n\n(catálogo público vazio ou indisponível)";
+          extras = all.length ? `\n\n📚 Public fal catalog:${all.join("\n")}` : "\n\n(public catalog empty or unavailable)";
         }
 
         return {
@@ -77,11 +167,11 @@ const handler = createMcpHandler(
             {
               type: "text",
               text:
-                `⭐ FAVORITOS do Felipe (${favCount} modelos, mode=${mode}):\n` +
+                `⭐ FAVORITES (${favCount} models, mode=${mode}):\n` +
                 `Default: ${DEFAULT_MODEL}\n\n` +
                 favLines +
                 extras +
-                `\n\nDica: use 'use_case_routing' do models.json pra escolher rápido:\n` +
+                `\n\nTip: use 'use_case_routing' from models.json to pick quickly:\n` +
                 Object.entries(modelsConfig.use_case_routing)
                   .map(([k, v]) => `  • ${k} → ${v}`)
                   .join("\n"),
@@ -92,42 +182,42 @@ const handler = createMcpHandler(
     );
 
     // -------------------------------------------------------
-    // TOOL 2: Text-to-Image (gerar do zero)
+    // TOOL 2: Text-to-Image (generate from scratch)
     // -------------------------------------------------------
     server.tool(
       "fal_generate_image",
-      "Gera uma imagem do zero a partir de texto. Usa um modelo dos favoritos (passe model_id) ou um endpoint arbitrário do fal (passe endpoint_id direto). SEMPRE mostra o custo da chamada e o acumulado da sessão.",
+      "Generates an image from scratch out of a text prompt. Uses a favorite model (pass model_id) or an arbitrary fal endpoint (pass endpoint_id directly). ALWAYS reports the call cost and the running session total.",
       {
-        prompt: z.string().min(1).describe("Descrição textual da imagem desejada"),
+        prompt: z.string().min(1).describe("Text description of the desired image"),
         model_id: z
           .string()
           .optional()
-          .describe(`ID do modelo favorito (${Object.keys(FAVORITES).join(", ")}). Default: ${DEFAULT_MODEL}`),
+          .describe(`Favorite model ID (${Object.keys(FAVORITES).join(", ")}). Default: ${DEFAULT_MODEL}`),
         endpoint_id: z
           .string()
           .optional()
-          .describe("Endpoint arbitrário do fal (ex: 'fal-ai/flux/dev'). Use isso se quiser um modelo fora dos favoritos. Tem prioridade sobre model_id."),
-        num_images: z.number().min(1).max(4).default(1),
+          .describe("Arbitrary fal endpoint (e.g. 'fal-ai/flux/dev'). Use this for a model outside the favorites. Takes priority over model_id."),
+        num_images: z.number().min(1).max(4).default(1).describe("Number of images to generate (1-4)"),
         aspect_ratio: z
           .string()
           .optional()
-          .describe("Ex: '1:1', '16:9', '9:16'. Usado por modelos que aceitam aspect_ratio."),
+          .describe("E.g. '1:1', '16:9', '9:16'. Used by models that accept aspect_ratio."),
         image_size: z
           .string()
           .optional()
-          .describe("Ex: '1024x1024', 'square_hd', 'landscape_16_9'. Usado por modelos que aceitam image_size."),
+          .describe("E.g. '1024x1024', 'square_hd', 'landscape_16_9'. Used by models that accept image_size."),
         quality: z
           .enum(["auto", "low", "medium", "high"])
           .optional()
-          .describe("Para modelos com tiers (gpt-image-1/1.5/2/mini). Default varia por modelo."),
-        output_format: z.enum(["jpeg", "png", "webp"]).optional(),
+          .describe("For models with quality tiers (gpt-image-1/1.5/2/mini). Default varies by model."),
+        output_format: z.enum(["jpeg", "png", "webp"]).optional().describe("Output image format. Used by models that accept output_format."),
         extra_params: z
           .record(z.any())
           .optional()
-          .describe("Params extras que vão direto pro body do fal (override). Use pra coisas específicas do modelo (negative_prompt, seed, safety_tolerance, etc)"),
+          .describe("Extra params passed straight into the fal request body (override). Use for model-specific options (negative_prompt, seed, safety_tolerance, etc)."),
       },
       async (args) => {
-        // ----- Resolver modelo + endpoint -----
+        // ----- Resolve model + endpoint -----
         let endpoint: string;
         let modelLabel: string;
         let pricingModel: typeof FAVORITES[string] | null = null;
@@ -138,63 +228,40 @@ const handler = createMcpHandler(
         } else {
           const id = args.model_id ?? DEFAULT_MODEL;
           const m = getModel(id);
-          if (!m.endpoints.t2i) throw new Error(`Modelo ${id} não suporta text-to-image (sem endpoint t2i).`);
+          if (!m.endpoints.t2i) throw new Error(`Model ${id} does not support text-to-image (no t2i endpoint).`);
           endpoint = m.endpoints.t2i;
           modelLabel = `${m.name} (${id})`;
           pricingModel = m;
         }
 
-        // ----- Montar input -----
-        const input: Record<string, unknown> = {
-          prompt: args.prompt,
-          num_images: args.num_images,
-        };
-        if (args.aspect_ratio) input.aspect_ratio = args.aspect_ratio;
-        if (args.image_size) input.image_size = args.image_size;
-        if (args.quality) input.quality = args.quality;
-        if (args.output_format) input.output_format = args.output_format;
+        // ----- Anti-SSRF: validate the (possibly user-supplied) endpoint -----
+        assertValidEndpoint(endpoint);
 
-        // Mescla defaults do modelo se for favorito
-        if (pricingModel?.default_params) {
-          for (const [k, v] of Object.entries(pricingModel.default_params)) {
-            if (input[k] == null) input[k] = v;
-          }
-        }
-        // Override com extra_params
-        if (args.extra_params) Object.assign(input, args.extra_params);
+        // ----- Build input -----
+        const input = buildFalInput(args.prompt, args.num_images, pricingModel, {
+          aspect_ratio: args.aspect_ratio,
+          image_size: args.image_size,
+          quality: args.quality,
+          output_format: args.output_format,
+          extra_params: args.extra_params,
+        });
 
-        // ----- Chamar fal -----
+        // ----- Call fal -----
         const start = Date.now();
         const { data, request_id } = await falSubscribe(endpoint, input);
         const elapsed = ((Date.now() - start) / 1000).toFixed(1);
 
-        // ----- Extrair URLs -----
+        // ----- Extract URLs + cost -----
         const urls = extractImageUrls(data);
-
-        // ----- Calcular custo -----
-        let costStr = "Custo: indisponível (modelo fora dos favoritos)";
-        if (pricingModel) {
-          const cost = calculateCost({
-            model: pricingModel,
-            mode: "t2i",
-            num_images: args.num_images,
-            quality: typeof input.quality === "string" ? input.quality : undefined,
-            image_size: typeof input.image_size === "string" ? input.image_size : undefined,
-          });
-          tracker.record(pricingModel.id, "t2i", args.num_images, cost);
-          costStr =
-            `💰 Custo: $${cost.total_usd.toFixed(4)} ` +
-            `($${cost.per_image_usd.toFixed(4)}/img × ${args.num_images}, key=${cost.pricing_key})\n` +
-            `   Sessão: $${tracker.total.toFixed(4)} (${tracker.calls.length} chamadas)`;
-        }
+        const costStr = recordAndFormatCost(pricingModel, "t2i", args.num_images, input);
 
         return {
           content: [
             {
               type: "text",
               text:
-                `✅ Gerou ${urls.length} imagem(ns) em ${elapsed}s\n` +
-                `Modelo: ${modelLabel}\n` +
+                `✅ Generated ${urls.length} image(s) in ${elapsed}s\n` +
+                `Model: ${modelLabel}\n` +
                 `Endpoint: ${endpoint}\n` +
                 `Request ID: ${request_id}\n` +
                 costStr +
@@ -203,7 +270,7 @@ const handler = createMcpHandler(
             ...urls.map((url) => ({
               type: "image" as const,
               data: url,
-              mimeType: "image/png" as const,
+              mimeType: mimeFromUrl(url),
             })),
           ],
         };
@@ -211,31 +278,31 @@ const handler = createMcpHandler(
     );
 
     // -------------------------------------------------------
-    // TOOL 3: Image edit (edição com referência)
+    // TOOL 3: Image edit (edit with a reference image)
     // -------------------------------------------------------
     server.tool(
       "fal_edit_image",
-      "Edita/transforma uma imagem existente usando texto + imagem de referência. Aceita 1+ URLs como referência (limite varia por modelo). SEMPRE mostra o custo.",
+      "Edits/transforms an existing image using a text prompt + reference image(s). Accepts 1+ reference URLs (the limit varies by model). ALWAYS reports the cost.",
       {
-        prompt: z.string().min(1).describe("O que você quer mudar/adicionar/transformar"),
+        prompt: z.string().min(1).describe("What you want to change/add/transform"),
         image_urls: z
           .array(z.string().url())
           .min(1)
-          .describe("URL(s) da(s) imagem(ns) de referência. A maioria dos modelos aceita 1; alguns (gemini-25-flash, gpt-image-1-mini/1.5) aceitam até 4."),
+          .describe("URL(s) of the reference image(s). Most models accept 1; some (gemini-25-flash, gpt-image-1-mini/1.5) accept up to 4."),
         model_id: z
           .string()
           .optional()
-          .describe(`ID do modelo favorito que suporta edit (${Object.values(FAVORITES).filter((m) => m.supports.edit).map((m) => m.id).join(", ")})`),
-        endpoint_id: z.string().optional().describe("Endpoint arbitrário de edit/image-to-image do fal. Override do model_id."),
-        num_images: z.number().min(1).max(4).default(1),
-        aspect_ratio: z.string().optional(),
-        image_size: z.string().optional(),
-        quality: z.enum(["auto", "low", "medium", "high"]).optional(),
-        output_format: z.enum(["jpeg", "png", "webp"]).optional(),
-        extra_params: z.record(z.any()).optional(),
+          .describe(`Favorite model ID that supports editing (${Object.values(FAVORITES).filter((m) => m.supports.edit).map((m) => m.id).join(", ")})`),
+        endpoint_id: z.string().optional().describe("Arbitrary fal edit/image-to-image endpoint. Overrides model_id."),
+        num_images: z.number().min(1).max(4).default(1).describe("Number of output images to generate (1-4)"),
+        aspect_ratio: z.string().optional().describe("E.g. '1:1', '16:9', '9:16'. Used by models that accept aspect_ratio."),
+        image_size: z.string().optional().describe("E.g. '1024x1024', 'square_hd', 'landscape_16_9'. Used by models that accept image_size."),
+        quality: z.enum(["auto", "low", "medium", "high"]).optional().describe("For models with quality tiers. Default varies by model."),
+        output_format: z.enum(["jpeg", "png", "webp"]).optional().describe("Output image format. Used by models that accept output_format."),
+        extra_params: z.record(z.any()).optional().describe("Extra params passed straight into the fal request body (override). Use for model-specific options."),
       },
       async (args) => {
-        // ----- Resolver endpoint -----
+        // ----- Resolve endpoint -----
         let endpoint: string;
         let modelLabel: string;
         let pricingModel: typeof FAVORITES[string] | null = null;
@@ -244,93 +311,68 @@ const handler = createMcpHandler(
           endpoint = args.endpoint_id;
           modelLabel = `[custom] ${args.endpoint_id}`;
         } else {
-          const id = args.model_id ?? "gemini-25-flash"; // default sensato pra edit
+          const id = args.model_id ?? (modelsConfig.default_edit_image ?? "gemini-25-flash");
           const m = getModel(id);
-          if (!m.supports.edit || !m.endpoints.edit) throw new Error(`Modelo ${id} não suporta edição de imagem.`);
+          if (!m.supports.edit || !m.endpoints.edit) throw new Error(`Model ${id} does not support image editing.`);
           endpoint = m.endpoints.edit;
           modelLabel = `${m.name} (${id})`;
           pricingModel = m;
         }
 
-        // ----- Validar quantidade de referências -----
+        // ----- Anti-SSRF: validate the (possibly user-supplied) endpoint -----
+        assertValidEndpoint(endpoint);
+
+        // ----- Validate the number of reference images -----
         if (pricingModel?.supports.max_reference_images != null) {
           const max = pricingModel.supports.max_reference_images;
           if (args.image_urls.length > max) {
             throw new Error(
-              `Modelo ${pricingModel.id} aceita no máximo ${max} imagem(ns) de referência. Você passou ${args.image_urls.length}.`
+              `Model ${pricingModel.id} accepts at most ${max} reference image(s). You passed ${args.image_urls.length}.`
             );
           }
         }
 
-        // ----- Montar input -----
-        // Convenção do fal: a maioria dos endpoints de edit aceita
-        //   - image_url (string)         OU
-        //   - image_urls (array)         OU
-        //   - reference_images (array)
-        // A gente passa os dois formatos mais comuns; o modelo ignora o que não usa.
-        const input: Record<string, unknown> = {
-          prompt: args.prompt,
-          num_images: args.num_images,
-        };
+        // ----- Build input -----
+        // fal convention: edit endpoints accept image_url (string) OR image_urls (array).
+        // We send both when there's a single ref; models ignore the format they don't use.
+        const input = buildFalInput(args.prompt, args.num_images, pricingModel, {
+          aspect_ratio: args.aspect_ratio,
+          image_size: args.image_size,
+          quality: args.quality,
+          output_format: args.output_format,
+          extra_params: args.extra_params,
+        });
         if (args.image_urls.length === 1) {
           input.image_url = args.image_urls[0];
-          input.image_urls = args.image_urls;
-        } else {
-          input.image_urls = args.image_urls;
         }
-        if (args.aspect_ratio) input.aspect_ratio = args.aspect_ratio;
-        if (args.image_size) input.image_size = args.image_size;
-        if (args.quality) input.quality = args.quality;
-        if (args.output_format) input.output_format = args.output_format;
+        input.image_urls = args.image_urls;
 
-        if (pricingModel?.default_params) {
-          for (const [k, v] of Object.entries(pricingModel.default_params)) {
-            if (input[k] == null) input[k] = v;
-          }
-        }
-        if (args.extra_params) Object.assign(input, args.extra_params);
-
-        // ----- Chamar fal -----
+        // ----- Call fal -----
         const start = Date.now();
         const { data, request_id } = await falSubscribe(endpoint, input);
         const elapsed = ((Date.now() - start) / 1000).toFixed(1);
 
+        // ----- Extract URLs + cost -----
         const urls = extractImageUrls(data);
-
-        // ----- Calcular custo -----
-        let costStr = "Custo: indisponível (modelo fora dos favoritos)";
-        if (pricingModel) {
-          const cost = calculateCost({
-            model: pricingModel,
-            mode: "edit",
-            num_images: args.num_images,
-            quality: typeof input.quality === "string" ? input.quality : undefined,
-            image_size: typeof input.image_size === "string" ? input.image_size : undefined,
-          });
-          tracker.record(pricingModel.id, "edit", args.num_images, cost);
-          costStr =
-            `💰 Custo: $${cost.total_usd.toFixed(4)} ` +
-            `($${cost.per_image_usd.toFixed(4)}/img × ${args.num_images}, key=${cost.pricing_key})\n` +
-            `   Sessão: $${tracker.total.toFixed(4)} (${tracker.calls.length} chamadas)`;
-        }
+        const costStr = recordAndFormatCost(pricingModel, "edit", args.num_images, input);
 
         return {
           content: [
             {
               type: "text",
               text:
-                `✅ Editou ${urls.length} imagem(ns) em ${elapsed}s\n` +
-                `Modelo: ${modelLabel}\n` +
+                `✅ Edited into ${urls.length} image(s) in ${elapsed}s\n` +
+                `Model: ${modelLabel}\n` +
                 `Endpoint: ${endpoint}\n` +
-                `Referências: ${args.image_urls.length}\n` +
+                `References: ${args.image_urls.length}\n` +
                 `Request ID: ${request_id}\n` +
                 costStr +
-                `\n\nURLs resultado:\n${urls.map((u, i) => `  ${i + 1}. ${u}`).join("\n")}`,
+                `\n\nResult URLs:\n${urls.map((u, i) => `  ${i + 1}. ${u}`).join("\n")}`,
             },
             ...urls.map((url) => ({
               type: "image" as const,
               data: url,
-              mimeType: "image/png" as const,
+              mimeType: mimeFromUrl(url),
             })),
           ],
         };
@@ -338,25 +380,25 @@ const handler = createMcpHandler(
     );
 
     // -------------------------------------------------------
-    // TOOL 4: Custo acumulado
+    // TOOL 4: Accumulated session cost
     // -------------------------------------------------------
     server.tool(
       "fal_session_cost",
-      "Mostra o custo total acumulado nessa sessão + lista as últimas chamadas.",
+      "Shows the total cost accumulated in this session plus a list of the most recent calls.",
       {},
       async () => ({
-        content: [{ type: "text", text: tracker.format() }],
+        content: [{ type: "text", text: currentTracker().format() }],
       })
     );
 
     // -------------------------------------------------------
-    // TOOL 5: Detalhes de um modelo favorito
+    // TOOL 5: Details of a favorite model
     // -------------------------------------------------------
     server.tool(
       "fal_model_info",
-      "Detalhes de um modelo favorito específico: pricing, capabilities, aspect ratios suportados, defaults.",
+      "Details of a specific favorite model: pricing, capabilities, supported aspect ratios, and defaults.",
       {
-        model_id: z.string().describe(`ID do modelo (${Object.keys(FAVORITES).join(", ")})`),
+        model_id: z.string().describe(`Model ID (${Object.keys(FAVORITES).join(", ")})`),
       },
       async ({ model_id }) => {
         const m = getModel(model_id);
@@ -385,7 +427,7 @@ const handler = createMcpHandler(
     );
   },
   {
-    // capabilities — opcional, fica vazio
+    // capabilities — optional, left empty
   },
   {
     basePath: "/api",
@@ -395,27 +437,16 @@ const handler = createMcpHandler(
 );
 
 // ============================================================
-// Wrapper de auth nos handlers HTTP
+// HTTP handlers — auth first, then run the MCP handler inside a
+// per-session AsyncLocalStorage context so tools can read the session id.
 // ============================================================
 
-async function withAuth(req: Request, fn: () => Promise<Response>): Promise<Response> {
-  try {
-    checkAuth(req);
-  } catch (e) {
-    return new Response(JSON.stringify({ error: (e as Error).message }), {
-      status: 401,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
-  return fn();
-}
-
 export async function GET(req: Request) {
-  return withAuth(req, () => handler(req));
+  return withAuth(req, () => sessionCtx.run({ sessionId: sessionIdFromReq(req) }, () => handler(req)));
 }
 export async function POST(req: Request) {
-  return withAuth(req, () => handler(req));
+  return withAuth(req, () => sessionCtx.run({ sessionId: sessionIdFromReq(req) }, () => handler(req)));
 }
 export async function DELETE(req: Request) {
-  return withAuth(req, () => handler(req));
+  return withAuth(req, () => sessionCtx.run({ sessionId: sessionIdFromReq(req) }, () => handler(req)));
 }

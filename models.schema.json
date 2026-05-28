@@ -1,0 +1,287 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "FalMcpModelsConfig",
+  "description": "Schema for fal-mcp models.json — catalog of favorite fal.ai image models with pricing, endpoints and capabilities.",
+  "type": "object",
+  "required": ["version", "provider", "queue_base_url", "sync_base_url", "default", "models", "use_case_routing", "common_aspect_ratios", "auth"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string",
+      "description": "Catalog version string (e.g. ISO date)."
+    },
+    "provider": {
+      "type": "string",
+      "description": "API provider name, e.g. fal.ai."
+    },
+    "queue_base_url": {
+      "type": "string",
+      "format": "uri",
+      "description": "Base URL for the fal queue API."
+    },
+    "sync_base_url": {
+      "type": "string",
+      "format": "uri",
+      "description": "Base URL for the fal sync (run) API."
+    },
+    "default": {
+      "type": "string",
+      "description": "Default model ID used when no model is specified."
+    },
+    "default_text_to_image": {
+      "type": "string",
+      "description": "Optional override: default model ID for text-to-image tasks."
+    },
+    "default_edit_image": {
+      "type": "string",
+      "description": "Optional override: default model ID for edit/refine tasks."
+    },
+    "models": {
+      "type": "object",
+      "description": "Map of model ID to model object.",
+      "additionalProperties": {
+        "$ref": "#/definitions/FavoriteModel"
+      }
+    },
+    "use_case_routing": {
+      "type": "object",
+      "description": "Map of use-case key to recommended model ID (or routing note).",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "common_aspect_ratios": {
+      "type": "object",
+      "description": "Map of human-readable name to aspect ratio string.",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "auth": {
+      "type": "object",
+      "description": "Authentication configuration for the fal API.",
+      "required": ["header", "env_var", "fallback_env_vars"],
+      "additionalProperties": false,
+      "properties": {
+        "header": {
+          "type": "string",
+          "description": "Authorization header template, e.g. 'Authorization: Key $FAL_KEY'."
+        },
+        "env_var": {
+          "type": "string",
+          "description": "Primary environment variable name that holds the API key."
+        },
+        "fallback_env_vars": {
+          "type": "array",
+          "description": "Fallback environment variable names tried in order if the primary is unset.",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "FavoriteModel": {
+      "type": "object",
+      "description": "A single favorite/curated fal.ai model entry.",
+      "required": ["id", "name", "vendor", "endpoints", "pricing", "tier", "use_cases", "supports", "default_params", "docs"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Stable short identifier for this model (matches the map key)."
+        },
+        "name": {
+          "type": "string",
+          "description": "Human-readable display name."
+        },
+        "vendor": {
+          "type": "string",
+          "description": "Vendor/organization that produced the model, e.g. openai, google, xai."
+        },
+        "endpoints": {
+          "$ref": "#/definitions/ModelEndpoints"
+        },
+        "pricing": {
+          "$ref": "#/definitions/ModelPricing"
+        },
+        "tier": {
+          "type": "string",
+          "enum": ["$", "$$", "$$$"],
+          "description": "Cost tier: $ cheap, $$ mid, $$$ expensive."
+        },
+        "use_cases": {
+          "type": "array",
+          "description": "Short phrases describing ideal use cases.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "supports": {
+          "$ref": "#/definitions/ModelSupports"
+        },
+        "default_params": {
+          "type": "object",
+          "description": "Default request parameters to pass to the fal endpoint.",
+          "additionalProperties": true
+        },
+        "docs": {
+          "type": "string",
+          "format": "uri",
+          "description": "URL to the model's fal.ai documentation page."
+        }
+      }
+    },
+    "ModelEndpoints": {
+      "type": "object",
+      "description": "fal endpoint path(s) for this model.",
+      "additionalProperties": false,
+      "properties": {
+        "t2i": {
+          "type": "string",
+          "description": "Endpoint path for text-to-image generation."
+        },
+        "edit": {
+          "type": "string",
+          "description": "Endpoint path for image editing/refinement."
+        }
+      }
+    },
+    "ModelPricing": {
+      "type": "object",
+      "description": "Pricing information. Fields may be a flat number per image, an object map of size/quality keys to numbers, or a per-megapixel rate.",
+      "additionalProperties": true,
+      "properties": {
+        "t2i_usd_per_image": {
+          "description": "Cost per generated image — either a flat number or a map of size/quality tier keys to USD amounts.",
+          "oneOf": [
+            { "type": "number" },
+            {
+              "type": "object",
+              "additionalProperties": { "type": "number" }
+            }
+          ]
+        },
+        "edit_usd_per_image": {
+          "description": "Cost per edited image — either a flat number or a map of size/quality tier keys to USD amounts.",
+          "oneOf": [
+            { "type": "number" },
+            {
+              "type": "object",
+              "additionalProperties": { "type": "number" }
+            }
+          ]
+        },
+        "t2i_usd_per_megapixel": {
+          "type": "number",
+          "description": "Cost per megapixel for text-to-image (used by flux-style models)."
+        },
+        "edit_usd_per_megapixel": {
+          "type": "number",
+          "description": "Cost per megapixel for edit (used by flux-style models)."
+        },
+        "examples": {
+          "type": "object",
+          "description": "Example cost estimates keyed by resolution string.",
+          "additionalProperties": { "type": "number" }
+        },
+        "notes": {
+          "type": "string",
+          "description": "Free-text pricing notes for humans."
+        }
+      }
+    },
+    "ModelSupports": {
+      "type": "object",
+      "description": "Capability flags and limits for this model.",
+      "required": ["t2i", "edit"],
+      "additionalProperties": true,
+      "properties": {
+        "t2i": {
+          "type": "boolean",
+          "description": "True if the model supports text-to-image generation."
+        },
+        "edit": {
+          "type": "boolean",
+          "description": "True if the model supports image editing with a reference image."
+        },
+        "aspect_ratios": {
+          "type": "array",
+          "description": "Supported aspect ratio strings, e.g. '16:9'.",
+          "items": { "type": "string" }
+        },
+        "image_sizes": {
+          "type": "array",
+          "description": "Supported named or pixel image sizes.",
+          "items": { "type": "string" }
+        },
+        "custom_size": {
+          "type": "boolean",
+          "description": "True if arbitrary width/height can be specified."
+        },
+        "max_custom_edge_px": {
+          "type": "number",
+          "description": "Maximum pixels allowed on any single edge when using custom_size."
+        },
+        "min_edge_px": {
+          "type": "number",
+          "description": "Minimum pixels on any edge."
+        },
+        "max_edge_px": {
+          "type": "number",
+          "description": "Maximum pixels on any edge."
+        },
+        "max_reference_images": {
+          "type": "number",
+          "description": "Maximum number of reference images accepted (0 = none)."
+        },
+        "negative_prompt": {
+          "type": "boolean",
+          "description": "True if the model accepts a negative prompt parameter."
+        },
+        "quality_tiers": {
+          "type": "boolean",
+          "description": "True if the model accepts a quality/tier parameter (low/medium/high)."
+        },
+        "qualities": {
+          "type": "array",
+          "description": "Available quality tier names.",
+          "items": { "type": "string" }
+        },
+        "resolution_tiers": {
+          "type": "array",
+          "description": "Available resolution tier names, e.g. '1K', '2K', '4K'.",
+          "items": { "type": "string" }
+        },
+        "output_formats": {
+          "type": "array",
+          "description": "Supported output image formats.",
+          "items": { "type": "string" }
+        },
+        "num_images_max": {
+          "type": "number",
+          "description": "Maximum number of images that can be requested in a single call."
+        },
+        "guidance_scale_range": {
+          "type": "array",
+          "description": "Min and max valid guidance scale values [min, max].",
+          "items": { "type": "number" },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "guidance_scale_default": {
+          "type": "number",
+          "description": "Default guidance scale value."
+        },
+        "prompt_expansion": {
+          "type": "boolean",
+          "description": "True if the model supports/applies automatic prompt expansion."
+        }
+      }
+    }
+  }
+}
