@@ -13,6 +13,7 @@ const gptImage2     = models["gpt-image-2"];       // complex table, t2i only
 const gptImage1Mini = models["gpt-image-1-mini"];  // complex table with _1024 / _other keys
 const flux2Flash    = models["flux-2-flash"];       // per-megapixel
 const grokImagine   = models["grok-imagine"];       // flat t2i + edit
+const pixelcutBg    = models["pixelcut-bg-remove"];  // flat bg_remove $0.016
 
 // ---------------------------------------------------------------------------
 // 1. Fixed (flat) pricing — gemini-25-flash
@@ -254,5 +255,42 @@ describe("calculateCost — flat edit pricing (grok-imagine)", () => {
     });
     expect(result.per_image_usd).toBeCloseTo(0.022, 6);
     expect(result.pricing_key).toBe("fixed");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 10. Background removal — pixelcut-bg-remove flat $0.016
+// ---------------------------------------------------------------------------
+describe("calculateCost — background removal (pixelcut-bg-remove)", () => {
+  it("returns $0.016 per image for bg_remove mode", () => {
+    const result = calculateCost({
+      model: pixelcutBg,
+      mode: "bg_remove",
+      num_images: 1,
+    });
+    expect(result.per_image_usd).toBeCloseTo(0.016, 6);
+    expect(result.total_usd).toBeCloseTo(0.016, 6);
+    expect(result.pricing_key).toBe("bg_remove_fixed");
+  });
+
+  it("scales total_usd linearly for 3 images", () => {
+    const result = calculateCost({
+      model: pixelcutBg,
+      mode: "bg_remove",
+      num_images: 3,
+    });
+    expect(result.total_usd).toBeCloseTo(0.016 * 3, 6);
+    expect(result.pricing_key).toBe("bg_remove_fixed");
+  });
+
+  it("returns pricing_key 'missing' when a model lacks bg_remove pricing", () => {
+    const result = calculateCost({
+      model: gemini25Flash,   // no bg_remove_usd_per_image
+      mode: "bg_remove",
+      num_images: 1,
+    });
+    expect(result.per_image_usd).toBe(0);
+    expect(result.total_usd).toBe(0);
+    expect(result.pricing_key).toBe("missing");
   });
 });

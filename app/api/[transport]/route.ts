@@ -10,8 +10,8 @@ import {
   formatFavoritesList,
   config as modelsConfig,
 } from "@/lib/models";
-import { calculateCost, getTracker } from "@/lib/pricing";
-import { falSubscribe, extractImageUrls, listFalCatalog, assertValidEndpoint } from "@/lib/fal";
+import { calculateCost, getTracker, type CostMode } from "@/lib/pricing";
+import { falSubscribe, extractImageUrls, listFalCatalog, assertValidEndpoint, isImageAlreadyTransparent } from "@/lib/fal";
 import { withAuth } from "@/lib/auth";
 
 // ============================================================
@@ -84,7 +84,7 @@ function buildFalInput(
 /** Computes cost, records it on the per-session tracker, returns a formatted string. */
 function recordAndFormatCost(
   modelDef: FavModel | null,
-  mode: "t2i" | "edit",
+  mode: CostMode,
   num_images: number,
   input: Record<string, unknown>
 ): string {
@@ -365,6 +365,118 @@ const handler = createMcpHandler(
                 `Model: ${modelLabel}\n` +
                 `Endpoint: ${endpoint}\n` +
                 `References: ${args.image_urls.length}\n` +
+                `Request ID: ${request_id}\n` +
+                costStr +
+                `\n\nResult URLs:\n${urls.map((u, i) => `  ${i + 1}. ${u}`).join("\n")}`,
+            },
+            ...urls.map((url) => ({
+              type: "image" as const,
+              data: url,
+              mimeType: mimeFromUrl(url),
+            })),
+          ],
+        };
+      }
+    );
+
+    // -------------------------------------------------------
+    // TOOL 3b: Background removal (cutout)
+    // -------------------------------------------------------
+    server.tool(
+      "fal_remove_background",
+      "Removes the background from an image, returning a transparent cutout (PNG/rgba by default). Powered by Pixelcut — ideal for product photos and e-commerce. Takes a single image URL (no prompt). ALWAYS reports the cost.",
+      {
+        image_url: z.string().url().describe("URL of the image to remove the background from (JPEG or PNG)."),
+        model_id: z
+          .string()
+          .optional()
+          .describe(`Favorite model ID that supports bg removal. Default: ${modelsConfig.use_case_routing?.remove_background_DEFAULT ?? "pixelcut-bg-remove"}`),
+        endpoint_id: z.string().optional().describe("Arbitrary fal background-removal endpoint. Overrides model_id."),
+        output_format: z
+          .enum(["rgba", "alpha", "zip"])
+          .optional()
+          .describe("rgba = transparent PNG (default), alpha = mask only, zip = packaged result."),
+        force: z
+          .boolean()
+          .default(false)
+          .describe("If false (default), skips the paid call when the image already looks transparent (saves ~$0.016). Set true to remove anyway."),
+        extra_params: z.record(z.any()).optional().describe("Extra params passed straight into the fal request body (override)."),
+      },
+      async (args) => {
+        // ----- Resolve endpoint -----
+        let endpoint: string;
+        let modelLabel: string;
+        let pricingModel: typeof FAVORITES[string] | null = null;
+
+        if (args.endpoint_id) {
+          endpoint = args.endpoint_id;
+          modelLabel = `[custom] ${args.endpoint_id}`;
+        } else {
+          const id = args.model_id ?? (modelsConfig.use_case_routing?.remove_background_DEFAULT ?? "pixelcut-bg-remove");
+          const m = getModel(id);
+          if (!m.supports.bg_remove || !m.endpoints.bg_remove) {
+            throw new Error(`Model ${id} does not support background removal.`);
+          }
+          endpoint = m.endpoints.bg_remove;
+          modelLabel = `${m.name} (${id})`;
+          pricingModel = m;
+        }
+
+        // ----- Anti-SSRF: validate the (possibly user-supplied) endpoint -----
+        assertValidEndpoint(endpoint);
+
+        // ----- Pre-check: skip the paid call if the image is already transparent -----
+        if (!args.force) {
+          const transparent = await isImageAlreadyTransparent(args.image_url);
+          if (transparent === true) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text:
+                    `⏭️  Skipped background removal — the image already looks transparent ` +
+                    `(saved ~$0.016).\n` +
+                    `Model would have been: ${modelLabel}\n` +
+                    `Pass force: true to remove anyway.\n\n` +
+                    `Image: ${args.image_url}`,
+                },
+                {
+                  type: "image" as const,
+                  data: args.image_url,
+                  mimeType: mimeFromUrl(args.image_url),
+                },
+              ],
+            };
+          }
+        }
+
+        // ----- Build input -----
+        const input: Record<string, unknown> = { image_url: args.image_url };
+        if (args.output_format) input.output_format = args.output_format;
+        if (pricingModel?.default_params) {
+          for (const [k, v] of Object.entries(pricingModel.default_params)) {
+            if (input[k] == null) input[k] = v;
+          }
+        }
+        if (args.extra_params) Object.assign(input, args.extra_params);
+
+        // ----- Call fal -----
+        const start = Date.now();
+        const { data, request_id } = await falSubscribe(endpoint, input);
+        const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+
+        // ----- Extract URLs + cost -----
+        const urls = extractImageUrls(data);
+        const costStr = recordAndFormatCost(pricingModel, "bg_remove", 1, input);
+
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                `✅ Removed background in ${elapsed}s\n` +
+                `Model: ${modelLabel}\n` +
+                `Endpoint: ${endpoint}\n` +
                 `Request ID: ${request_id}\n` +
                 costStr +
                 `\n\nResult URLs:\n${urls.map((u, i) => `  ${i + 1}. ${u}`).join("\n")}`,

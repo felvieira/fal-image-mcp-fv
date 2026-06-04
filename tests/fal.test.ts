@@ -1,6 +1,22 @@
 import { describe, it, expect } from "vitest";
-import { assertValidEndpoint, safeErrBody, extractImageUrls } from "@/lib/fal";
+import { assertValidEndpoint, safeErrBody, extractImageUrls, isImageAlreadyTransparent } from "@/lib/fal";
 import type { FalSubscribeResult } from "@/lib/fal";
+
+// Helpers para montar data URIs de teste com headers reais (sem libs de imagem)
+function dataUri(mime: string, bytes: number[]): string {
+  const bin = String.fromCharCode(...bytes);
+  // btoa existe no runtime do vitest (node 18+/jsdom)
+  return `data:${mime};base64,${btoa(bin)}`;
+}
+// PNG sig + IHDR (len=13, "IHDR", w=1, h=1, bitDepth=8, colorType=N)
+function pngHeader(colorType: number): number[] {
+  return [
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, // sig
+    0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, // len=13 "IHDR"
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, // w=1 h=1
+    0x08, colorType, 0x00, 0x00, 0x00,              // bitDepth=8, colorType, comp/filter/interlace
+  ];
+}
 
 // ---------------------------------------------------------------------------
 // assertValidEndpoint
@@ -167,5 +183,44 @@ describe("extractImageUrls", () => {
     const result = extractImageUrls(data);
     expect(result).toEqual(["https://cdn.fal.ai/a.jpg"]);
     expect(result).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// isImageAlreadyTransparent — header-level detection via data URIs (no network)
+// ---------------------------------------------------------------------------
+describe("isImageAlreadyTransparent — data URI header detection", () => {
+  it("returns true for PNG with RGBA color type (6)", async () => {
+    const uri = dataUri("image/png", pngHeader(6));
+    expect(await isImageAlreadyTransparent(uri)).toBe(true);
+  });
+
+  it("returns true for PNG with grayscale+alpha color type (4)", async () => {
+    const uri = dataUri("image/png", pngHeader(4));
+    expect(await isImageAlreadyTransparent(uri)).toBe(true);
+  });
+
+  it("returns false for PNG with RGB color type (2, no alpha)", async () => {
+    const uri = dataUri("image/png", pngHeader(2));
+    expect(await isImageAlreadyTransparent(uri)).toBe(false);
+  });
+
+  it("returns true for indexed PNG that carries a tRNS chunk", async () => {
+    // colorType=3 (indexed) + a tRNS chunk somewhere in the buffer
+    const bytes = [...pngHeader(3), 0x00, 0x00, 0x00, 0x01, 0x74, 0x52, 0x4e, 0x53, 0xff];
+    expect(await isImageAlreadyTransparent(dataUri("image/png", bytes))).toBe(true);
+  });
+
+  it("returns false for JPEG (never has alpha)", async () => {
+    const bytes = [0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0, 0, 0, 0, 0, 0];
+    expect(await isImageAlreadyTransparent(dataUri("image/jpeg", bytes))).toBe(false);
+  });
+
+  it("returns null for an unrecognised / too-short buffer", async () => {
+    expect(await isImageAlreadyTransparent(dataUri("application/octet-stream", [1, 2, 3]))).toBeNull();
+  });
+
+  it("returns null for a malformed data URI", async () => {
+    expect(await isImageAlreadyTransparent("data:image/png;base64,!!!notbase64!!!")).toBeNull();
   });
 });

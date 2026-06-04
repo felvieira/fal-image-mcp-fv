@@ -164,6 +164,103 @@ export async function falSubscribe(
 }
 
 // ============================================================
+// Pre-check de transparência (best-effort, sem libs de imagem)
+// ============================================================
+// O MCP roda serverless (Node) e recebe a imagem por URL. Pra evitar
+// gastar $ removendo fundo de algo que já é transparente, baixamos os
+// primeiros bytes e inspecionamos o header:
+//   - JPEG (FF D8): nunca tem alpha → opaco.
+//   - PNG: byte de color-type no IHDR (offset 25). 6=RGBA, 4=LA → pode ter
+//     alpha; tRNS chunk em PNG indexado/paleta também indica transparência.
+//   - WebP: chunk "VP8L" (lossless) com bit de alpha, ou "ALPH"/"VP8X" flag.
+// Retorna true (provavelmente transparente) | false (opaco) | null (incerto).
+// É header-level: detecta CAPACIDADE de alpha, não amostra pixels. Conservador
+// — na dúvida (null) deixa seguir pro Pixelcut. Falsos-positivos de "tem canal
+// mas é 100% opaco" são possíveis; aceitável porque o lado Python (com Pillow)
+// faz o check completo de pixels quando há arquivo local.
+// ============================================================
+
+function detectTransparencyFromHeader(buf: Uint8Array): boolean | null {
+  if (buf.length < 16) return null;
+
+  // JPEG: FF D8 FF
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return false;
+
+  // PNG: 89 50 4E 47 0D 0A 1A 0A
+  const isPng =
+    buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47 &&
+    buf[4] === 0x0d && buf[5] === 0x0a && buf[6] === 0x1a && buf[7] === 0x0a;
+  if (isPng) {
+    // IHDR color type fica no offset 25 (8 sig + 4 len + 4 "IHDR" + 4 w + 4 h + 1 bitDepth)
+    const colorType = buf[25];
+    if (colorType === 6 || colorType === 4) return true; // RGBA / grayscale+alpha
+    // PNG indexado (3) ou outros: procura um chunk tRNS nos bytes baixados
+    if (indexOfChunk(buf, "tRNS") >= 0) return true;
+    return false;
+  }
+
+  // WebP: "RIFF"...."WEBP"
+  const isWebp =
+    buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&
+    buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50;
+  if (isWebp) {
+    // VP8X com flag de alpha (bit 0x10 no byte de flags) ou chunk ALPH presente
+    if (indexOfChunk(buf, "ALPH") >= 0) return true;
+    const vp8x = indexOfChunk(buf, "VP8X");
+    if (vp8x >= 0 && vp8x + 8 < buf.length) {
+      const flags = buf[vp8x + 8];
+      return (flags & 0x10) !== 0;
+    }
+    // VP8L (lossless) byte de flags tem o bit de alpha (0x10) no 5º byte do payload
+    const vp8l = indexOfChunk(buf, "VP8L");
+    if (vp8l >= 0 && vp8l + 12 < buf.length) {
+      return (buf[vp8l + 12] & 0x10) !== 0;
+    }
+    return null; // VP8 lossy sem ALPH = opaco, mas seja conservador
+  }
+
+  return null; // formato desconhecido
+}
+
+/** Acha o offset de um chunk FourCC ASCII no buffer (ex: "tRNS", "ALPH"). -1 se ausente. */
+function indexOfChunk(buf: Uint8Array, fourcc: string): number {
+  const a = fourcc.charCodeAt(0), b = fourcc.charCodeAt(1);
+  const c = fourcc.charCodeAt(2), d = fourcc.charCodeAt(3);
+  for (let i = 0; i + 3 < buf.length; i++) {
+    if (buf[i] === a && buf[i + 1] === b && buf[i + 2] === c && buf[i + 3] === d) return i;
+  }
+  return -1;
+}
+
+/**
+ * Baixa os primeiros bytes da imagem e checa se já é transparente.
+ * Best-effort: qualquer falha (rede, formato) retorna null (não bloqueia).
+ */
+export async function isImageAlreadyTransparent(url: string): Promise<boolean | null> {
+  // data URI: decodifica direto
+  if (url.startsWith("data:")) {
+    try {
+      const b64 = url.split(",", 2)[1] ?? "";
+      const bin = atob(b64);
+      const bytes = new Uint8Array(Math.min(bin.length, 65536));
+      for (let i = 0; i < bytes.length; i++) bytes[i] = bin.charCodeAt(i);
+      return detectTransparencyFromHeader(bytes);
+    } catch {
+      return null;
+    }
+  }
+  try {
+    // Range request — só precisamos do header + chunks iniciais (64KB cobre tRNS/ALPH cedo)
+    const res = await fetch(url, { headers: { Range: "bytes=0-65535" } });
+    if (!res.ok && res.status !== 206) return null;
+    const ab = await res.arrayBuffer();
+    return detectTransparencyFromHeader(new Uint8Array(ab));
+  } catch {
+    return null;
+  }
+}
+
+// ============================================================
 // Extrai URLs de imagem do response (formato varia por modelo)
 // ============================================================
 

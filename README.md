@@ -25,6 +25,7 @@ Remote **MCP server** for [fal.ai](https://fal.ai) image models. Connect it to C
 | `fal_list_models`     | Lists favorites + (optional) fal catalog, filters by mode     |
 | `fal_generate_image`  | Text-to-image on any favorite or custom endpoint              |
 | `fal_edit_image`      | Edit with 1+ reference images                                 |
+| `fal_remove_background` | Remove background → transparent cutout (Pixelcut). Skips already-transparent images to save cost (`force` to override) |
 | `fal_session_cost`    | Accumulated cost + call history                               |
 | `fal_model_info`      | Details (pricing, supports, defaults) for one favorite        |
 
@@ -113,8 +114,13 @@ claude mcp add --transport http fal-image \
 → `fal_edit_image({ prompt: "watercolor painting style", image_urls: ["..."], model_id: "gemini-25-flash" })`
 → Cost: $0.0390 (session: $0.0780)
 
+> "Remove the background from this product photo [URL]"
+→ `fal_remove_background({ image_url: "..." })`
+→ Transparent PNG cutout · Cost: $0.0160 (session: $0.0940)
+→ (if the image already looks transparent, it's skipped to save ~$0.016 — pass `force: true` to remove anyway)
+
 > "How much have I spent so far?"
-→ `fal_session_cost` → 💰 Total: $0.0780, 2 calls
+→ `fal_session_cost` → 💰 Total: $0.0940, 3 calls
 
 > "Show me gpt-image-2 details"
 → `fal_model_info({ model_id: "gpt-image-2" })`

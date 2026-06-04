@@ -351,6 +351,34 @@
         "safety_tolerance": "4"
       },
       "docs": "https://fal.ai/models/fal-ai/gemini-3-pro-image-preview"
+    },
+
+    "pixelcut-bg-remove": {
+      "id": "pixelcut-bg-remove",
+      "name": "Pixelcut Background Remover",
+      "vendor": "pixelcut",
+      "endpoints": {
+        "bg_remove": "pixelcut/background-removal"
+      },
+      "pricing": {
+        "bg_remove_usd_per_image": 0.016,
+        "notes": "remocao de fundo ultra high-quality; e-commerce/cutout. $1 = ~62 imagens"
+      },
+      "tier": "$",
+      "use_cases": ["remover fundo de foto de produto", "cutout para e-commerce", "PNG transparente de objeto/pessoa", "preparar imagem para compositing"],
+      "supports": {
+        "t2i": false,
+        "edit": false,
+        "bg_remove": true,
+        "max_reference_images": 1,
+        "negative_prompt": false,
+        "quality_tiers": false,
+        "output_formats": ["rgba", "alpha", "zip"]
+      },
+      "default_params": {
+        "output_format": "rgba"
+      },
+      "docs": "https://fal.ai/models/pixelcut/background-removal"
     }
   },
 
@@ -358,6 +386,7 @@
     "_REGRA_CANONICA": "text-to-image (sem ref) = flux-2-flash ($0.005/MP). edit/refine com ref = gemini-25-flash ($0.039). Subir tier apenas se prompt exigir tipografia/fotorrealismo.",
     "text_to_image_DEFAULT": "flux-2-flash",
     "edit_image_DEFAULT": "gemini-25-flash",
+    "remove_background_DEFAULT": "pixelcut-bg-remove",
     "muita_imagem_barata": "flux-2-flash",
     "custo_fixo_producao_escala": "gemini-25-flash",
     "prompt_dificil_tipografia": "gemini-3-pro",

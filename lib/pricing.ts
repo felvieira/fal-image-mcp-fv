@@ -7,9 +7,11 @@ import { FavoriteModel } from "./models";
 // E com modelos que têm tabela por quality x size (ex: gpt-image-2)
 // ============================================================
 
+export type CostMode = "t2i" | "edit" | "bg_remove";
+
 export type CostInput = {
   model: FavoriteModel;
-  mode: "t2i" | "edit";
+  mode: CostMode;
   num_images: number;
   quality?: string;       // "low" | "medium" | "high" | "auto"
   image_size?: string;    // "1024x1024" | "1024x1536" | "1536x1024" | etc.
@@ -93,6 +95,25 @@ function resolveDims(input: CostInput): [number, number] {
 export function calculateCost(input: CostInput): CostResult {
   const { model, mode, num_images, quality, image_size } = input;
 
+  // Caso bg_remove: preço fixo por imagem (ex: pixelcut-bg-remove $0.016)
+  if (mode === "bg_remove") {
+    const flat = model.pricing.bg_remove_usd_per_image;
+    if (typeof flat === "number") {
+      return {
+        per_image_usd: flat,
+        total_usd: flat * num_images,
+        pricing_key: "bg_remove_fixed",
+        notes: model.pricing.notes,
+      };
+    }
+    return {
+      per_image_usd: 0,
+      total_usd: 0,
+      pricing_key: "missing",
+      notes: `Modelo ${model.id} não tem pricing definido pra remoção de fundo.`,
+    };
+  }
+
   // Caso 0: preço por megapixel (ex: flux-2-flash)
   const mpPrice = (model.pricing as Record<string, unknown>)[
     mode === "t2i" ? "t2i_usd_per_megapixel" : "edit_usd_per_megapixel"
@@ -150,7 +171,7 @@ export function calculateCost(input: CostInput): CostResult {
 type CallRecord = {
   ts: number;
   model_id: string;
-  mode: "t2i" | "edit";
+  mode: CostMode;
   num_images: number;
   cost_usd: number;
   pricing_key: string;
@@ -160,7 +181,7 @@ class SessionTracker {
   total = 0;
   calls: CallRecord[] = [];
 
-  record(model_id: string, mode: "t2i" | "edit", num_images: number, result: CostResult) {
+  record(model_id: string, mode: CostMode, num_images: number, result: CostResult) {
     this.total += result.total_usd;
     this.calls.push({
       ts: Date.now(),

@@ -9,6 +9,7 @@ export type ModelId = string;
 export type ModelEndpoints = {
   t2i?: string;
   edit?: string;
+  bg_remove?: string;
 };
 
 export type ModelPricing = {
@@ -17,12 +18,15 @@ export type ModelPricing = {
   /** Preço por megapixel — usado por modelos como flux-2-flash ($0.005/MP) */
   t2i_usd_per_megapixel?: number;
   edit_usd_per_megapixel?: number;
+  /** Preço fixo por imagem para remoção de fundo (ex: pixelcut-bg-remove $0.016) */
+  bg_remove_usd_per_image?: number;
   notes?: string;
 };
 
 export type ModelSupports = {
   t2i: boolean;
   edit: boolean;
+  bg_remove?: boolean;
   aspect_ratios?: string[];
   image_sizes?: string[];
   custom_size?: boolean;
