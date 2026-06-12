@@ -6,7 +6,7 @@ Remote **MCP server** for [fal.ai](https://fal.ai) image models. Connect it to C
 
 ## Features
 
-- **7 curated image models** ready to go (configurable in `models.json`): `grok-imagine`, `gemini-25-flash`, `gpt-image-1-mini`, `gpt-image-1.5`, `gpt-image-1`, `gpt-image-2`, `gemini-3-pro`
+- **9 curated image models** ready to go (configurable in `models.json`): `flux-2-flash`, `grok-imagine`, `gemini-25-flash`, `gpt-image-1-mini`, `gpt-image-1.5`, `gpt-image-1`, `gpt-image-2`, `gemini-3-pro`, `pixelcut-bg-remove`
 - **Dynamic catalog search** for any other fal.ai model
 - **Per-call cost calculation** — handles complex pricing tables (quality × size)
 - **Session cost accumulator** — see total spend per session
@@ -157,6 +157,8 @@ Models with complex pricing: `gpt-image-1`, `gpt-image-1-mini`, `gpt-image-1.5`,
 | gpt-image-1       | $$$  | varies    | varies     | legacy; prefer 1.5/mini                     |
 | gpt-image-2       | $$$  | varies    | ❌         | t2i only; 4K = $0.401 in high               |
 | gemini-3-pro      | $$$  | $0.150    | $0.150     | Nano Banana Pro; 4K doubles                 |
+| flux-2-flash      | $    | $0.005/MP | ❌         | Cheapest t2i; ~$0.002–0.012/img depending on size |
+| pixelcut-bg-remove | $   | ❌        | ❌         | bg removal only: $0.016/img |
 
 ## Known limitations
 

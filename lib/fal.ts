@@ -1,17 +1,42 @@
-import { config } from "./models";
+﻿import { config } from "./models";
+
 
 // ============================================================
-// Cliente HTTP minimal do fal.ai
+// Anti-SSRF: valida URLs externas antes de fetch server-side
 // ============================================================
-// Usa direto a Queue API (fal.run / queue.fal.run) sem o SDK
-// oficial pra manter o bundle pequeno na Vercel.
+
+/** Returns true if the URL is safe to fetch server-side (no SSRF). */
+function isSafeExternalUrl(url: string): boolean {
+  let parsed: URL;
+  try { parsed = new URL(url); } catch { return false; }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+  const host = parsed.hostname.toLowerCase();
+  const BLOCKED = [
+    /^localhost$/,
+    /^127\./,
+    /^0\./,
+    /^10\./,
+    /^172\.(1[6-9]|2\d|3[01])\./,
+    /^192\.168\./,
+    /^169\.254\./,
+    /^\[?::1\]?$/,
+    /^\[?fc[0-9a-f]{2}:/,
+    /^\[?fe80:/,
+  ];
+  return !BLOCKED.some((re) => re.test(host));
+}
+
+// ============================================================
+// Minimal fal.ai HTTP client
+// ============================================================
+// Uses the Queue API (fal.run / queue.fal.run) directly, without
+// the official SDK, to keep the Vercel bundle small.
 // Docs: https://fal.ai/docs/documentation/model-apis/inference-methods
 // ============================================================
 
 const QUEUE_BASE = config.queue_base_url; // https://queue.fal.run
-const SYNC_BASE = config.sync_base_url;   // https://fal.run
 
-/** Resolve a FAL_KEY das env vars suportadas (sem lançar). */
+/** Resolves FAL_KEY from supported env vars (non-throwing). */
 function resolveFalKey(): string | undefined {
   return (
     process.env.FAL_KEY ??
@@ -20,12 +45,12 @@ function resolveFalKey(): string | undefined {
   );
 }
 
-/** True se há FAL_KEY configurada em runtime — usado pra fail-fast claro. */
+/** True if a FAL_KEY is configured at runtime — used for early fail-fast. */
 function hasFalKey(): boolean {
   return Boolean(resolveFalKey());
 }
 
-/** Lê FAL_KEY em runtime (lazy) — falha rápido se ausente na chamada, não no boot. */
+/** Reads FAL_KEY at runtime (lazy) — fails fast if missing on call, not at boot. */
 function getFalKey(): string {
   const key = resolveFalKey();
   if (!key) {
@@ -40,11 +65,11 @@ const AUTH_HEADER = () => ({
 });
 
 // ============================================================
-// Anti-SSRF: valida o endpoint controlado pelo usuário
+// Anti-SSRF: validates the user-controlled endpoint
 // ============================================================
-// O `endpoint` vem da tool do MCP (endpoint_id arbitrário). Sem validação,
-// um valor como `../../foo`, uma URL absoluta ou path traversal poderia
-// escapar do host do fal. Exige um path relativo do fal, ex:
+// The `endpoint` comes from the MCP tool (arbitrary endpoint_id). Without
+// validation, a value like `../../foo`, an absolute URL, or a path traversal
+// could escape the fal host. Requires a relative fal path, e.g.:
 //   `fal-ai/flux/dev`, `xai/grok-imagine-image`, `openai/gpt-image-2`,
 //   `fal-ai/nano-banana/edit`, `.../text-to-image`.
 // ============================================================
@@ -57,15 +82,15 @@ export function assertValidEndpoint(endpoint: string): void {
   if (endpoint.includes("..")) {
     throw new Error("[fal-mcp] endpoint inválido: contém '..'.");
   }
-  // sem scheme (http://, https://, etc.) — deve ser path relativo
+  // no scheme (http://, https://, etc.) — must be a relative path
   if (endpoint.includes("://")) {
     throw new Error("[fal-mcp] endpoint inválido: não pode conter um scheme (://).");
   }
-  // sem barra inicial — evita duplicação de host e URLs absolutas de path
+  // no leading slash — avoids host duplication and absolute path URLs
   if (endpoint.startsWith("/")) {
     throw new Error("[fal-mcp] endpoint inválido: não pode começar com '/'.");
   }
-  // apenas caracteres seguros — barras internas e sufixos como /edit são ok
+  // only safe characters — internal slashes and suffixes like /edit are allowed
   if (!/^[A-Za-z0-9/_.-]+$/.test(endpoint)) {
     throw new Error(
       "[fal-mcp] endpoint inválido: apenas [A-Za-z0-9/_.-] são permitidos."
@@ -74,10 +99,10 @@ export function assertValidEndpoint(endpoint: string): void {
 }
 
 // ============================================================
-// Sanitiza corpos de erro vindos do upstream (fal)
+// Sanitizes error bodies from upstream (fal)
 // ============================================================
-// Evita vazar tokens/keys e respostas gigantes pro cliente do MCP.
-// Trunca em 500 chars e redige qualquer coisa parecida com bearer/key token.
+// Prevents leaking tokens/keys and huge responses to the MCP client.
+// Truncates to 500 chars and redacts anything resembling a bearer/key token.
 // ============================================================
 
 export function safeErrBody(text: string): string {
@@ -89,7 +114,7 @@ export function safeErrBody(text: string): string {
 }
 
 // ============================================================
-// Subscribe (síncrono — submete + polla até pronto)
+// Subscribe (synchronous — submit + poll until done)
 // ============================================================
 
 export type FalSubscribeResult = {
@@ -103,9 +128,9 @@ export async function falSubscribe(
   endpoint: string,
   input: Record<string, unknown>,
   opts: { pollIntervalMs?: number; timeoutMs?: number } = {}
-): Promise<{ data: FalSubscribeResult; request_id: string; logs: string[] }> {
-  // 0. Valida o endpoint (anti-SSRF) e a key ANTES de qualquer fetch —
-  //    falha rápido e com mensagem clara em vez de um erro críptico depois.
+): Promise<{ data: FalSubscribeResult; request_id: string }> {
+  // 0. Validate the endpoint (anti-SSRF) and the key BEFORE any fetch —
+  //    fail fast with a clear message instead of a cryptic error later.
   assertValidEndpoint(endpoint);
   if (!hasFalKey()) {
     throw new Error("FAL_KEY not configured on the server");
@@ -114,9 +139,7 @@ export async function falSubscribe(
   const pollInterval = opts.pollIntervalMs ?? 1500;
   const timeout = opts.timeoutMs ?? 180_000; // 3min
   const started = Date.now();
-  const logs: string[] = [];
-
-  // 1. Submete pro queue — endpoint já validado, sem barra inicial duplicada
+  // 1. Submit to the queue — endpoint already validated, no leading slash duplicate
   const submitUrl = `${QUEUE_BASE}/${endpoint}`;
   const submitRes = await fetch(submitUrl, {
     method: "POST",
@@ -131,9 +154,7 @@ export async function falSubscribe(
 
   const submitJson = (await submitRes.json()) as { request_id: string; status_url: string; response_url: string };
   const { request_id, status_url, response_url } = submitJson;
-  logs.push(`Submitted request_id=${request_id}`);
-
-  // 2. Pola status
+  // 2. Poll status
   while (Date.now() - started < timeout) {
     await new Promise((r) => setTimeout(r, pollInterval));
 
@@ -143,8 +164,6 @@ export async function falSubscribe(
       throw new Error(`fal status failed (${statusRes.status}): ${safeErrBody(errText)}`);
     }
     const status = (await statusRes.json()) as { status: string; logs?: { message: string }[] };
-    if (status.logs?.length) logs.push(...status.logs.map((l) => l.message));
-
     if (status.status === "COMPLETED") {
       const dataRes = await fetch(response_url, { headers: AUTH_HEADER() });
       if (!dataRes.ok) {
@@ -152,7 +171,7 @@ export async function falSubscribe(
         throw new Error(`fal result fetch failed (${dataRes.status}): ${safeErrBody(errText)}`);
       }
       const data = (await dataRes.json()) as FalSubscribeResult;
-      return { data, request_id, logs };
+      return { data, request_id };
     }
 
     if (status.status === "FAILED" || status.status === "ERROR") {
@@ -164,20 +183,20 @@ export async function falSubscribe(
 }
 
 // ============================================================
-// Pre-check de transparência (best-effort, sem libs de imagem)
+// Transparency pre-check (best-effort, no image libraries)
 // ============================================================
-// O MCP roda serverless (Node) e recebe a imagem por URL. Pra evitar
-// gastar $ removendo fundo de algo que já é transparente, baixamos os
-// primeiros bytes e inspecionamos o header:
-//   - JPEG (FF D8): nunca tem alpha → opaco.
-//   - PNG: byte de color-type no IHDR (offset 25). 6=RGBA, 4=LA → pode ter
-//     alpha; tRNS chunk em PNG indexado/paleta também indica transparência.
-//   - WebP: chunk "VP8L" (lossless) com bit de alpha, ou "ALPH"/"VP8X" flag.
-// Retorna true (provavelmente transparente) | false (opaco) | null (incerto).
-// É header-level: detecta CAPACIDADE de alpha, não amostra pixels. Conservador
-// — na dúvida (null) deixa seguir pro Pixelcut. Falsos-positivos de "tem canal
-// mas é 100% opaco" são possíveis; aceitável porque o lado Python (com Pillow)
-// faz o check completo de pixels quando há arquivo local.
+// The MCP runs serverless (Node) and receives the image by URL. To avoid
+// spending money removing the background of an already-transparent image,
+// we download the first bytes and inspect the header:
+//   - JPEG (FF D8): never has alpha → opaque.
+//   - PNG: color-type byte in IHDR (offset 25). 6=RGBA, 4=LA → may have
+//     alpha; a tRNS chunk in an indexed/palette PNG also signals transparency.
+//   - WebP: "VP8L" (lossless) chunk with alpha bit, or "ALPH"/"VP8X" flag.
+// Returns true (probably transparent) | false (opaque) | null (uncertain).
+// Header-level: detects alpha CAPABILITY, does not sample pixels. Conservative
+// — on doubt (null) lets the Pixelcut call proceed. False-positives ("has alpha
+// channel but is 100% opaque") are possible; acceptable because the Python side
+// (Pillow) does a full pixel check when a local file is available.
 // ============================================================
 
 function detectTransparencyFromHeader(buf: Uint8Array): boolean | null {
@@ -191,10 +210,10 @@ function detectTransparencyFromHeader(buf: Uint8Array): boolean | null {
     buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47 &&
     buf[4] === 0x0d && buf[5] === 0x0a && buf[6] === 0x1a && buf[7] === 0x0a;
   if (isPng) {
-    // IHDR color type fica no offset 25 (8 sig + 4 len + 4 "IHDR" + 4 w + 4 h + 1 bitDepth)
+    // IHDR color type is at offset 25 (8 sig + 4 len + 4 "IHDR" + 4 w + 4 h + 1 bitDepth)
     const colorType = buf[25];
     if (colorType === 6 || colorType === 4) return true; // RGBA / grayscale+alpha
-    // PNG indexado (3) ou outros: procura um chunk tRNS nos bytes baixados
+    // Indexed PNG (3) or others: look for a tRNS chunk in the downloaded bytes
     if (indexOfChunk(buf, "tRNS") >= 0) return true;
     return false;
   }
@@ -204,25 +223,25 @@ function detectTransparencyFromHeader(buf: Uint8Array): boolean | null {
     buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&
     buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50;
   if (isWebp) {
-    // VP8X com flag de alpha (bit 0x10 no byte de flags) ou chunk ALPH presente
+    // VP8X with alpha flag (bit 0x10 in the flags byte) or ALPH chunk present
     if (indexOfChunk(buf, "ALPH") >= 0) return true;
     const vp8x = indexOfChunk(buf, "VP8X");
     if (vp8x >= 0 && vp8x + 8 < buf.length) {
       const flags = buf[vp8x + 8];
       return (flags & 0x10) !== 0;
     }
-    // VP8L (lossless) byte de flags tem o bit de alpha (0x10) no 5º byte do payload
+    // VP8L (lossless) flags byte has the alpha bit (0x10) in the 5th byte of the payload
     const vp8l = indexOfChunk(buf, "VP8L");
     if (vp8l >= 0 && vp8l + 12 < buf.length) {
       return (buf[vp8l + 12] & 0x10) !== 0;
     }
-    return null; // VP8 lossy sem ALPH = opaco, mas seja conservador
+    return null; // VP8 lossy without ALPH = opaque, but stay conservative
   }
 
-  return null; // formato desconhecido
+  return null; // unknown format
 }
 
-/** Acha o offset de um chunk FourCC ASCII no buffer (ex: "tRNS", "ALPH"). -1 se ausente. */
+/** Finds the offset of an ASCII FourCC chunk in the buffer (e.g. "tRNS", "ALPH"). Returns -1 if absent. */
 function indexOfChunk(buf: Uint8Array, fourcc: string): number {
   const a = fourcc.charCodeAt(0), b = fourcc.charCodeAt(1);
   const c = fourcc.charCodeAt(2), d = fourcc.charCodeAt(3);
@@ -233,11 +252,11 @@ function indexOfChunk(buf: Uint8Array, fourcc: string): number {
 }
 
 /**
- * Baixa os primeiros bytes da imagem e checa se já é transparente.
- * Best-effort: qualquer falha (rede, formato) retorna null (não bloqueia).
+ * Downloads the first bytes of the image and checks whether it is already transparent.
+ * Best-effort: any failure (network, format) returns null (does not block the call).
  */
 export async function isImageAlreadyTransparent(url: string): Promise<boolean | null> {
-  // data URI: decodifica direto
+  // data URI: decode inline
   if (url.startsWith("data:")) {
     try {
       const b64 = url.split(",", 2)[1] ?? "";
@@ -249,8 +268,10 @@ export async function isImageAlreadyTransparent(url: string): Promise<boolean | 
       return null;
     }
   }
+  // Anti-SSRF: silently skip private/loopback URLs
+  if (!isSafeExternalUrl(url)) return null;
   try {
-    // Range request — só precisamos do header + chunks iniciais (64KB cobre tRNS/ALPH cedo)
+    // Range request — we only need the header + initial chunks (64 KB covers tRNS/ALPH early)
     const res = await fetch(url, { headers: { Range: "bytes=0-65535" } });
     if (!res.ok && res.status !== 206) return null;
     const ab = await res.arrayBuffer();
@@ -261,25 +282,44 @@ export async function isImageAlreadyTransparent(url: string): Promise<boolean | 
 }
 
 // ============================================================
-// Extrai URLs de imagem do response (formato varia por modelo)
+// Extract image URLs + MIME types from a fal response
+// ============================================================
+// Format varies by model. Propagates the real content_type when available.
 // ============================================================
 
-export function extractImageUrls(data: FalSubscribeResult): string[] {
+export type ImageResult = { url: string; mimeType: string };
+
+function mimeFromUrl(url: string): string {
+  const clean = url.split(/[?#]/)[0].toLowerCase();
+  if (clean.endsWith(".jpg") || clean.endsWith(".jpeg")) return "image/jpeg";
+  if (clean.endsWith(".png")) return "image/png";
+  if (clean.endsWith(".webp")) return "image/webp";
+  if (clean.endsWith(".gif")) return "image/gif";
+  return "image/png";
+}
+
+export function extractImageUrls(data: FalSubscribeResult): ImageResult[] {
   if (Array.isArray(data.images) && data.images.length > 0) {
-    return data.images.map((i) => i.url).filter(Boolean);
+    return data.images
+      .filter((i) => Boolean(i.url))
+      .map((i) => ({ url: i.url, mimeType: i.content_type ?? mimeFromUrl(i.url) }));
   }
-  if (data.image?.url) return [data.image.url];
-  if (Array.isArray(data.output_images)) return data.output_images;
-  // Apenas formatos conhecidos acima. Sem fallback heurístico: varrer todos
-  // os campos top-level atrás de qualquer .url pega a URL errada (ex:
-  // request.url, seed_url). Se nada bater, retorna vazio em vez de adivinhar.
+  if (data.image?.url) {
+    return [{ url: data.image.url, mimeType: mimeFromUrl(data.image.url) }];
+  }
+  if (Array.isArray(data.output_images)) {
+    return (data.output_images as string[]).map((url) => ({ url, mimeType: mimeFromUrl(url) }));
+  }
+  // Only the known formats above. No heuristic fallback: scanning all
+  // top-level fields for any .url would pick the wrong URL (e.g.
+  // request.url, seed_url). If nothing matches, return empty instead of guessing.
   return [];
 }
 
 // ============================================================
-// Lista dinâmica da catalog API do fal
+// Dynamic listing from the fal catalog API
 // ============================================================
-// Usa /api/models se disponível. Se falhar, retorna [].
+// Uses /api/models if available. Falls back to [] on any failure.
 // ============================================================
 
 export type FalCatalogModel = {
@@ -290,8 +330,8 @@ export type FalCatalogModel = {
 };
 
 export async function listFalCatalog(category?: string, limit = 30): Promise<FalCatalogModel[]> {
-  // Fail-fast claro: a catalog API também precisa da key. Lança ANTES do
-  // try/catch pra não ser engolido pelo fallback que retorna [].
+  // Clear fail-fast: the catalog API also requires the key. Throws BEFORE the
+  // try/catch so the error is not swallowed by the fallback that returns [].
   if (!hasFalKey()) {
     throw new Error("FAL_KEY not configured on the server");
   }

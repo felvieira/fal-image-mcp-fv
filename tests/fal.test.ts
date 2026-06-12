@@ -132,24 +132,32 @@ describe("extractImageUrls", () => {
     const data: FalSubscribeResult = {
       images: [{ url: "https://cdn.fal.ai/a.jpg" }, { url: "https://cdn.fal.ai/b.jpg" }],
     };
-    expect(extractImageUrls(data)).toEqual([
+    expect(extractImageUrls(data).map((r) => r.url)).toEqual([
       "https://cdn.fal.ai/a.jpg",
       "https://cdn.fal.ai/b.jpg",
     ]);
+  });
+
+  it("propagates content_type when available", () => {
+    const data: FalSubscribeResult = {
+      images: [{ url: "https://cdn.fal.ai/a.png", content_type: "image/png" }],
+    };
+    const result = extractImageUrls(data);
+    expect(result[0].mimeType).toBe("image/png");
   });
 
   it("extracts url from single image object", () => {
     const data: FalSubscribeResult = {
       image: { url: "https://cdn.fal.ai/c.jpg" },
     };
-    expect(extractImageUrls(data)).toEqual(["https://cdn.fal.ai/c.jpg"]);
+    expect(extractImageUrls(data).map((r) => r.url)).toEqual(["https://cdn.fal.ai/c.jpg"]);
   });
 
   it("extracts urls from output_images array", () => {
     const data: FalSubscribeResult = {
       output_images: ["https://cdn.fal.ai/d.jpg", "https://cdn.fal.ai/e.jpg"],
     };
-    expect(extractImageUrls(data)).toEqual([
+    expect(extractImageUrls(data).map((r) => r.url)).toEqual([
       "https://cdn.fal.ai/d.jpg",
       "https://cdn.fal.ai/e.jpg",
     ]);
@@ -173,7 +181,7 @@ describe("extractImageUrls", () => {
       images: [{ url: "https://cdn.fal.ai/a.jpg" }],
       image: { url: "https://cdn.fal.ai/c.jpg" },
     };
-    expect(extractImageUrls(data)).toEqual(["https://cdn.fal.ai/a.jpg"]);
+    expect(extractImageUrls(data).map((r) => r.url)).toEqual(["https://cdn.fal.ai/a.jpg"]);
   });
 
   it("filters falsy urls from images array", () => {
@@ -181,7 +189,7 @@ describe("extractImageUrls", () => {
       images: [{ url: "https://cdn.fal.ai/a.jpg" }, { url: "" }],
     };
     const result = extractImageUrls(data);
-    expect(result).toEqual(["https://cdn.fal.ai/a.jpg"]);
+    expect(result.map((r) => r.url)).toEqual(["https://cdn.fal.ai/a.jpg"]);
     expect(result).toHaveLength(1);
   });
 });

@@ -1,0 +1,26 @@
+# fal-image-mcp-fv
+
+> Remote MCP server for fal.ai image models. Connect to Claude, Cursor, or any MCP client and generate images with curated models, per-call cost tracking, and background removal. Deploy to Vercel in one click.
+
+## What it is
+
+A Model Context Protocol (MCP) server that gives LLM clients (Claude, Cursor, Claude Code) the ability to generate and edit images using fal.ai's image models — including FLUX.2 Flash, Grok Imagine, Gemini 2.5 Flash, GPT-Image-1/1.5/2, and Gemini 3 Pro.
+
+## Tools exposed
+
+- fal_list_models: List curated favorite models and optionally search the public fal.ai catalog
+- fal_generate_image: Generate an image from a text prompt using any favorite or custom fal endpoint
+- fal_edit_image: Edit an existing image using a text prompt and 1+ reference image URLs
+- fal_remove_background: Remove the background from an image, returning a transparent PNG (Pixelcut)
+- fal_session_cost: Show accumulated USD cost for the current session
+- fal_model_info: Show pricing, capabilities, and defaults for a specific favorite model
+
+## How to deploy
+
+1. Click the Vercel deploy button on the GitHub repo
+2. Set FAL_KEY (from fal.ai/dashboard/keys) and MCP_BEARER_TOKEN (any random string)
+3. Add the deployed URL to your MCP client config
+
+## GitHub
+
+https://github.com/felvieira/fal-image-mcp-fv

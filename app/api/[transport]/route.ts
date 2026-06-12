@@ -26,16 +26,22 @@ const sessionCtx = new AsyncLocalStorage<{ sessionId: string }>();
 
 /**
  * Derives a stable session id from the request:
- *   1. `mcp-session-id` header if present (the MCP transport sets this)
- *   2. otherwise a sha256 hash of the `authorization` header (per-token bucket)
+ *   1. `mcp-session-id` header namespaced under the auth token hash (session isolation)
+ *   2. otherwise the sha256 hash of the `authorization` header (per-token bucket)
  *   3. otherwise the literal "anon"
+ *
+ * The auth token is always mixed in so a client cannot supply another user's
+ * mcp-session-id and read their accumulated cost via fal_session_cost.
  */
 function sessionIdFromReq(req: Request): string {
-  const explicit = req.headers.get("mcp-session-id");
-  if (explicit) return explicit;
+  const auth = req.headers.get("authorization") ?? "";
+  const tokenHash = createHash("sha256").update(auth, "utf8").digest("hex").slice(0, 16);
 
-  const auth = req.headers.get("authorization");
-  if (auth) return createHash("sha256").update(auth, "utf8").digest("hex");
+  const explicit = req.headers.get("mcp-session-id");
+  if (explicit) return tokenHash + ":" + explicit;
+
+  // No session-id header: use the full token hash as a per-token bucket
+  if (auth) return tokenHash;
 
   return "anon";
 }
@@ -76,8 +82,16 @@ function buildFalInput(
       if (input[k] == null) input[k] = v;
     }
   }
-  // Explicit caller overrides win
-  if (opts.extra_params) Object.assign(input, opts.extra_params);
+  // Bug 3 fix: explicit caller overrides win — but never allow overriding
+  // reserved keys (prompt, num_images, image_url, image_urls) via extra_params,
+  // as that would let callers bypass cost tracking or inject unexpected inputs.
+  if (opts.extra_params) {
+    const RESERVED = new Set(["prompt", "num_images", "image_url", "image_urls"]);
+    const safe = Object.fromEntries(
+      Object.entries(opts.extra_params).filter(([k]) => !RESERVED.has(k))
+    );
+    Object.assign(input, safe);
+  }
   return input;
 }
 
@@ -103,16 +117,6 @@ function recordAndFormatCost(
     `($${cost.per_image_usd.toFixed(4)}/img × ${num_images}, key=${cost.pricing_key})\n` +
     `   Session: $${tracker.total.toFixed(4)} (${tracker.calls.length} calls)`
   );
-}
-
-/** Infers an image MIME type from the URL extension, defaulting to image/png. */
-function mimeFromUrl(url: string): string {
-  const clean = url.split(/[?#]/)[0].toLowerCase();
-  if (clean.endsWith(".jpg") || clean.endsWith(".jpeg")) return "image/jpeg";
-  if (clean.endsWith(".png")) return "image/png";
-  if (clean.endsWith(".webp")) return "image/webp";
-  if (clean.endsWith(".gif")) return "image/gif";
-  return "image/png";
 }
 
 // ============================================================
@@ -151,11 +155,12 @@ const handler = createMcpHandler(
               ? ["image-to-image", "image-editing"]
               : ["text-to-image", "image-to-image", "image-editing"];
 
+          const results = await Promise.all(cats.map((c) => listFalCatalog(c, catalog_limit)));
           const all: string[] = [];
-          for (const c of cats) {
-            const list = await listFalCatalog(c, catalog_limit);
+          for (let i = 0; i < cats.length; i++) {
+            const list = results[i];
             if (list.length) {
-              all.push(`\n[${c}]`);
+              all.push(`\n[${cats[i]}]`);
               for (const m of list) all.push(`  ${m.endpoint_id} — ${m.name}`);
             }
           }
@@ -192,7 +197,8 @@ const handler = createMcpHandler(
         model_id: z
           .string()
           .optional()
-          .describe(`Favorite model ID (${Object.keys(FAVORITES).join(", ")}). Default: ${DEFAULT_MODEL}`),
+          // Bug 2 fix: description reflects the real default (default_text_to_image, not DEFAULT_MODEL)
+          .describe(`Favorite model ID (${Object.keys(FAVORITES).join(", ")}). Default: ${modelsConfig.default_text_to_image ?? DEFAULT_MODEL}`),
         endpoint_id: z
           .string()
           .optional()
@@ -226,7 +232,8 @@ const handler = createMcpHandler(
           endpoint = args.endpoint_id;
           modelLabel = `[custom] ${args.endpoint_id}`;
         } else {
-          const id = args.model_id ?? DEFAULT_MODEL;
+          // Bug 2 fix: use default_text_to_image instead of DEFAULT_MODEL (gemini-25-flash)
+          const id = args.model_id ?? (modelsConfig.default_text_to_image ?? DEFAULT_MODEL);
           const m = getModel(id);
           if (!m.endpoints.t2i) throw new Error(`Model ${id} does not support text-to-image (no t2i endpoint).`);
           endpoint = m.endpoints.t2i;
@@ -252,7 +259,7 @@ const handler = createMcpHandler(
         const elapsed = ((Date.now() - start) / 1000).toFixed(1);
 
         // ----- Extract URLs + cost -----
-        const urls = extractImageUrls(data);
+        const images = extractImageUrls(data);
         const costStr = recordAndFormatCost(pricingModel, "t2i", args.num_images, input);
 
         return {
@@ -260,17 +267,17 @@ const handler = createMcpHandler(
             {
               type: "text",
               text:
-                `✅ Generated ${urls.length} image(s) in ${elapsed}s\n` +
+                `✅ Generated ${images.length} image(s) in ${elapsed}s\n` +
                 `Model: ${modelLabel}\n` +
                 `Endpoint: ${endpoint}\n` +
                 `Request ID: ${request_id}\n` +
                 costStr +
-                `\n\nURLs:\n${urls.map((u, i) => `  ${i + 1}. ${u}`).join("\n")}`,
+                `\n\nURLs:\n${images.map((img, i) => `  ${i + 1}. ${img.url}`).join("\n")}`,
             },
-            ...urls.map((url) => ({
-              type: "image" as const,
-              data: url,
-              mimeType: mimeFromUrl(url),
+            // Bug 1 fix: use type "resource" with uri+text (not type "image" with base64 data)
+            ...images.map((img) => ({
+              type: "resource" as const,
+              resource: { uri: img.url, text: img.url, mimeType: img.mimeType },
             })),
           ],
         };
@@ -353,7 +360,7 @@ const handler = createMcpHandler(
         const elapsed = ((Date.now() - start) / 1000).toFixed(1);
 
         // ----- Extract URLs + cost -----
-        const urls = extractImageUrls(data);
+        const images = extractImageUrls(data);
         const costStr = recordAndFormatCost(pricingModel, "edit", args.num_images, input);
 
         return {
@@ -361,18 +368,18 @@ const handler = createMcpHandler(
             {
               type: "text",
               text:
-                `✅ Edited into ${urls.length} image(s) in ${elapsed}s\n` +
+                `✅ Edited into ${images.length} image(s) in ${elapsed}s\n` +
                 `Model: ${modelLabel}\n` +
                 `Endpoint: ${endpoint}\n` +
                 `References: ${args.image_urls.length}\n` +
                 `Request ID: ${request_id}\n` +
                 costStr +
-                `\n\nResult URLs:\n${urls.map((u, i) => `  ${i + 1}. ${u}`).join("\n")}`,
+                `\n\nResult URLs:\n${images.map((img, i) => `  ${i + 1}. ${img.url}`).join("\n")}`,
             },
-            ...urls.map((url) => ({
-              type: "image" as const,
-              data: url,
-              mimeType: mimeFromUrl(url),
+            // Bug 1 fix: use type "resource" with uri+text (not type "image" with base64 data)
+            ...images.map((img) => ({
+              type: "resource" as const,
+              resource: { uri: img.url, text: img.url, mimeType: img.mimeType },
             })),
           ],
         };
@@ -440,10 +447,10 @@ const handler = createMcpHandler(
                     `Pass force: true to remove anyway.\n\n` +
                     `Image: ${args.image_url}`,
                 },
+                // Bug 1 fix: use type "resource" with uri+text (not type "image" with base64 data)
                 {
-                  type: "image" as const,
-                  data: args.image_url,
-                  mimeType: mimeFromUrl(args.image_url),
+                  type: "resource" as const,
+                  resource: { uri: args.image_url, text: args.image_url, mimeType: args.image_url.toLowerCase().endsWith(".jpg") || args.image_url.toLowerCase().endsWith(".jpeg") ? "image/jpeg" : args.image_url.toLowerCase().endsWith(".webp") ? "image/webp" : "image/png" },
                 },
               ],
             };
@@ -458,7 +465,14 @@ const handler = createMcpHandler(
             if (input[k] == null) input[k] = v;
           }
         }
-        if (args.extra_params) Object.assign(input, args.extra_params);
+        // Bug 3 fix: strip reserved keys from extra_params to prevent cost-tracking bypass
+        if (args.extra_params) {
+          const RESERVED = new Set(["prompt", "num_images", "image_url", "image_urls"]);
+          const safe = Object.fromEntries(
+            Object.entries(args.extra_params).filter(([k]) => !RESERVED.has(k))
+          );
+          Object.assign(input, safe);
+        }
 
         // ----- Call fal -----
         const start = Date.now();
@@ -466,7 +480,7 @@ const handler = createMcpHandler(
         const elapsed = ((Date.now() - start) / 1000).toFixed(1);
 
         // ----- Extract URLs + cost -----
-        const urls = extractImageUrls(data);
+        const images = extractImageUrls(data);
         const costStr = recordAndFormatCost(pricingModel, "bg_remove", 1, input);
 
         return {
@@ -479,12 +493,12 @@ const handler = createMcpHandler(
                 `Endpoint: ${endpoint}\n` +
                 `Request ID: ${request_id}\n` +
                 costStr +
-                `\n\nResult URLs:\n${urls.map((u, i) => `  ${i + 1}. ${u}`).join("\n")}`,
+                `\n\nResult URLs:\n${images.map((img, i) => `  ${i + 1}. ${img.url}`).join("\n")}`,
             },
-            ...urls.map((url) => ({
-              type: "image" as const,
-              data: url,
-              mimeType: mimeFromUrl(url),
+            // Bug 1 fix: use type "resource" with uri+text (not type "image" with base64 data)
+            ...images.map((img) => ({
+              type: "resource" as const,
+              resource: { uri: img.url, text: img.url, mimeType: img.mimeType },
             })),
           ],
         };
