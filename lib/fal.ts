@@ -76,24 +76,24 @@ const AUTH_HEADER = () => ({
 
 export function assertValidEndpoint(endpoint: string): void {
   if (!endpoint) {
-    throw new Error("[fal-mcp] endpoint inválido: vazio.");
+    throw new Error("[fal-mcp] invalid endpoint: empty.");
   }
   // path traversal
   if (endpoint.includes("..")) {
-    throw new Error("[fal-mcp] endpoint inválido: contém '..'.");
+    throw new Error("[fal-mcp] invalid endpoint: contains '..'.");
   }
   // no scheme (http://, https://, etc.) — must be a relative path
   if (endpoint.includes("://")) {
-    throw new Error("[fal-mcp] endpoint inválido: não pode conter um scheme (://).");
+    throw new Error("[fal-mcp] invalid endpoint: must not contain a scheme (://).");
   }
   // no leading slash — avoids host duplication and absolute path URLs
   if (endpoint.startsWith("/")) {
-    throw new Error("[fal-mcp] endpoint inválido: não pode começar com '/'.");
+    throw new Error("[fal-mcp] invalid endpoint: must not start with '/'.");
   }
   // only safe characters — internal slashes and suffixes like /edit are allowed
   if (!/^[A-Za-z0-9/_.-]+$/.test(endpoint)) {
     throw new Error(
-      "[fal-mcp] endpoint inválido: apenas [A-Za-z0-9/_.-] são permitidos."
+      "[fal-mcp] invalid endpoint: only [A-Za-z0-9/_.-] characters are allowed."
     );
   }
 }
@@ -154,18 +154,24 @@ export async function falSubscribe(
 
   const submitJson = (await submitRes.json()) as { request_id: string; status_url: string; response_url: string };
   const { request_id, status_url, response_url } = submitJson;
+  // Anti-SSRF: status_url/response_url come from fal's own response, but we
+  // validate them the same as every other externally-sourced URL in this file.
+  if (!isSafeExternalUrl(status_url) || !isSafeExternalUrl(response_url)) {
+    throw new Error("fal returned an unsafe status_url/response_url");
+  }
+  const headers = AUTH_HEADER();
   // 2. Poll status
   while (Date.now() - started < timeout) {
     await new Promise((r) => setTimeout(r, pollInterval));
 
-    const statusRes = await fetch(status_url, { headers: AUTH_HEADER() });
+    const statusRes = await fetch(status_url, { headers });
     if (!statusRes.ok) {
       const errText = await statusRes.text();
       throw new Error(`fal status failed (${statusRes.status}): ${safeErrBody(errText)}`);
     }
     const status = (await statusRes.json()) as { status: string; logs?: { message: string }[] };
     if (status.status === "COMPLETED") {
-      const dataRes = await fetch(response_url, { headers: AUTH_HEADER() });
+      const dataRes = await fetch(response_url, { headers });
       if (!dataRes.ok) {
         const errText = await dataRes.text();
         throw new Error(`fal result fetch failed (${dataRes.status}): ${safeErrBody(errText)}`);
@@ -179,7 +185,7 @@ export async function falSubscribe(
     }
   }
 
-  throw new Error(`fal timeout após ${timeout}ms — request_id=${request_id}`);
+  throw new Error(`fal timeout after ${timeout}ms — request_id=${request_id}`);
 }
 
 // ============================================================
@@ -289,7 +295,7 @@ export async function isImageAlreadyTransparent(url: string): Promise<boolean | 
 
 export type ImageResult = { url: string; mimeType: string };
 
-function mimeFromUrl(url: string): string {
+export function mimeFromUrl(url: string): string {
   const clean = url.split(/[?#]/)[0].toLowerCase();
   if (clean.endsWith(".jpg") || clean.endsWith(".jpeg")) return "image/jpeg";
   if (clean.endsWith(".png")) return "image/png";

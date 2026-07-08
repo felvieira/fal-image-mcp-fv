@@ -11,7 +11,7 @@ import {
   config as modelsConfig,
 } from "@/lib/models";
 import { calculateCost, getTracker, type CostMode } from "@/lib/pricing";
-import { falSubscribe, extractImageUrls, listFalCatalog, assertValidEndpoint, isImageAlreadyTransparent } from "@/lib/fal";
+import { falSubscribe, extractImageUrls, listFalCatalog, assertValidEndpoint, isImageAlreadyTransparent, mimeFromUrl } from "@/lib/fal";
 import { withAuth } from "@/lib/auth";
 
 // ============================================================
@@ -58,6 +58,12 @@ function currentTracker() {
 
 type FavModel = typeof FAVORITES[string];
 
+const RESERVED_INPUT_KEYS = new Set(["prompt", "num_images", "image_url", "image_urls"]);
+/** Strips reserved keys from caller-supplied extra_params to prevent cost-tracking bypass. */
+function sanitizeExtraParams(extra: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(extra).filter(([k]) => !RESERVED_INPUT_KEYS.has(k)));
+}
+
 /** Builds the base fal payload, merging the model's default params. */
 function buildFalInput(
   prompt: string,
@@ -86,11 +92,7 @@ function buildFalInput(
   // reserved keys (prompt, num_images, image_url, image_urls) via extra_params,
   // as that would let callers bypass cost tracking or inject unexpected inputs.
   if (opts.extra_params) {
-    const RESERVED = new Set(["prompt", "num_images", "image_url", "image_urls"]);
-    const safe = Object.fromEntries(
-      Object.entries(opts.extra_params).filter(([k]) => !RESERVED.has(k))
-    );
-    Object.assign(input, safe);
+    Object.assign(input, sanitizeExtraParams(opts.extra_params));
   }
   return input;
 }
@@ -173,7 +175,7 @@ const handler = createMcpHandler(
               type: "text",
               text:
                 `⭐ FAVORITES (${favCount} models, mode=${mode}):\n` +
-                `Default: ${DEFAULT_MODEL}\n\n` +
+                `Default: ${modelsConfig.default_text_to_image ?? DEFAULT_MODEL}\n\n` +
                 favLines +
                 extras +
                 `\n\nTip: use 'use_case_routing' from models.json to pick quickly:\n` +
@@ -450,7 +452,7 @@ const handler = createMcpHandler(
                 // Bug 1 fix: use type "resource" with uri+text (not type "image" with base64 data)
                 {
                   type: "resource" as const,
-                  resource: { uri: args.image_url, text: args.image_url, mimeType: args.image_url.toLowerCase().endsWith(".jpg") || args.image_url.toLowerCase().endsWith(".jpeg") ? "image/jpeg" : args.image_url.toLowerCase().endsWith(".webp") ? "image/webp" : "image/png" },
+                  resource: { uri: args.image_url, text: args.image_url, mimeType: mimeFromUrl(args.image_url) },
                 },
               ],
             };
@@ -467,11 +469,7 @@ const handler = createMcpHandler(
         }
         // Bug 3 fix: strip reserved keys from extra_params to prevent cost-tracking bypass
         if (args.extra_params) {
-          const RESERVED = new Set(["prompt", "num_images", "image_url", "image_urls"]);
-          const safe = Object.fromEntries(
-            Object.entries(args.extra_params).filter(([k]) => !RESERVED.has(k))
-          );
-          Object.assign(input, safe);
+          Object.assign(input, sanitizeExtraParams(args.extra_params));
         }
 
         // ----- Call fal -----
@@ -536,6 +534,7 @@ const handler = createMcpHandler(
           `Endpoints:`,
           m.endpoints.t2i ? `  • t2i: ${m.endpoints.t2i}` : `  • t2i: ❌`,
           m.endpoints.edit ? `  • edit: ${m.endpoints.edit}` : `  • edit: ❌`,
+          m.endpoints.bg_remove ? `  • bg_remove: ${m.endpoints.bg_remove}` : `  • bg_remove: ❌`,
           ``,
           `Use cases: ${m.use_cases.join(", ")}`,
           ``,

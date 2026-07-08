@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
 
+const BASE_URL = process.env.NEXT_PUBLIC_BASE_URL ?? "https://fal-image-mcp-fv.vercel.app";
+
 export const metadata: Metadata = {
   title: "fal-image-mcp — fal.ai image generation for Claude, Cursor & MCP clients",
   description:
@@ -11,7 +13,7 @@ export const metadata: Metadata = {
     description:
       "Remote MCP server for fal.ai. 9 curated image models, per-call cost tracking, one-click Vercel deploy.",
     type: "website",
-    url: "https://github.com/felvieira/fal-image-mcp-fv",
+    url: BASE_URL,
     images: [
       {
         url: "https://opengraph.githubassets.com/1/felvieira/fal-image-mcp-fv",

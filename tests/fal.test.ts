@@ -231,4 +231,29 @@ describe("isImageAlreadyTransparent — data URI header detection", () => {
   it("returns null for a malformed data URI", async () => {
     expect(await isImageAlreadyTransparent("data:image/png;base64,!!!notbase64!!!")).toBeNull();
   });
+
+  it("returns true for WebP carrying an ALPH chunk", async () => {
+    // Minimal RIFF/WEBP header ("RIFF" + size + "WEBP") followed by an "ALPH" chunk marker.
+    const bytes = [
+      0x52, 0x49, 0x46, 0x46, // "RIFF"
+      0x00, 0x00, 0x00, 0x00, // size (unused by the detector)
+      0x57, 0x45, 0x42, 0x50, // "WEBP"
+      0x41, 0x4c, 0x50, 0x48, // "ALPH" chunk marker
+      0x00, 0x00, 0x00, 0x00,
+    ];
+    expect(await isImageAlreadyTransparent(dataUri("image/webp", bytes))).toBe(true);
+  });
+
+  it("returns false for WebP (lossy VP8, no ALPH/VP8X/VP8L) — conservative null actually", async () => {
+    // Plain RIFF/WEBP with no ALPH/VP8X/VP8L markers falls through to the
+    // "stay conservative" branch and returns null, not false.
+    const bytes = [
+      0x52, 0x49, 0x46, 0x46, // "RIFF"
+      0x00, 0x00, 0x00, 0x00, // size
+      0x57, 0x45, 0x42, 0x50, // "WEBP"
+      0x56, 0x50, 0x38, 0x20, // "VP8 " (lossy, no alpha chunk)
+      0x00, 0x00, 0x00, 0x00,
+    ];
+    expect(await isImageAlreadyTransparent(dataUri("image/webp", bytes))).toBeNull();
+  });
 });

@@ -1,7 +1,7 @@
 import modelsJson from "@/models.json";
 
 // ============================================================
-// Tipos baseados no seu models.json
+// Types derived from models.json
 // ============================================================
 
 export type ModelId = string;
@@ -15,10 +15,10 @@ export type ModelEndpoints = {
 export type ModelPricing = {
   t2i_usd_per_image?: number | Record<string, number>;
   edit_usd_per_image?: number | Record<string, number>;
-  /** Preço por megapixel — usado por modelos como flux-2-flash ($0.005/MP) */
+  /** Price per megapixel — used by models like flux-2-flash ($0.005/MP) */
   t2i_usd_per_megapixel?: number;
   edit_usd_per_megapixel?: number;
-  /** Preço fixo por imagem para remoção de fundo (ex: pixelcut-bg-remove $0.016) */
+  /** Flat price per image for background removal (e.g. pixelcut-bg-remove $0.016) */
   bg_remove_usd_per_image?: number;
   notes?: string;
 };
@@ -82,7 +82,7 @@ export const DEFAULT_MODEL = config.default;
 
 export function getModel(id: ModelId): FavoriteModel {
   const m = FAVORITES[id];
-  if (!m) throw new Error(`Modelo favorito '${id}' não existe. Use fal_list_models pra ver os disponíveis.`);
+  if (!m) throw new Error(`Favorite model '${id}' not found. Run fal_list_models to see available models.`);
   return m;
 }
 
@@ -99,20 +99,42 @@ export function formatFavoritesList(mode: "t2i" | "edit" | "all" = "all"): strin
   const list = listFavorites(mode);
   return list
     .map((m) => {
-      // Suporta: flat/img, por megapixel, tabela complexa
+      // Supports: flat/img, per-megapixel, complex table
       let priceStr: string;
-      const mp = m.pricing.t2i_usd_per_megapixel;
-      const flat = m.pricing.t2i_usd_per_image;
-      if (typeof mp === "number") {
-        priceStr = `$${mp.toFixed(4)}/MP (~$${(mp * 1.05).toFixed(4)}/1024²)`;
-      } else if (typeof flat === "number") {
-        priceStr = `~$${flat.toFixed(3)}/img`;
+      if (m.supports.t2i) {
+        const mp = m.pricing.t2i_usd_per_megapixel;
+        const flat = m.pricing.t2i_usd_per_image;
+        if (typeof mp === "number") {
+          priceStr = `$${mp.toFixed(4)}/MP (~$${(mp * 1.05).toFixed(4)}/1024²)`;
+        } else if (typeof flat === "number") {
+          priceStr = `~$${flat.toFixed(3)}/img`;
+        } else {
+          priceStr = "variable price (by size/quality)";
+        }
+      } else if (m.supports.edit) {
+        const mp = m.pricing.edit_usd_per_megapixel;
+        const flat = m.pricing.edit_usd_per_image;
+        if (typeof mp === "number") {
+          priceStr = `$${mp.toFixed(4)}/MP (~$${(mp * 1.05).toFixed(4)}/1024²)`;
+        } else if (typeof flat === "number") {
+          priceStr = `~$${flat.toFixed(3)}/img`;
+        } else {
+          priceStr = "variable price (by size/quality)";
+        }
+      } else if (m.supports.bg_remove) {
+        const flat = m.pricing.bg_remove_usd_per_image;
+        if (typeof flat === "number") {
+          priceStr = `~$${flat.toFixed(3)}/img`;
+        } else {
+          priceStr = "variable price (by size/quality)";
+        }
       } else {
-        priceStr = "preço variável (por size/quality)";
+        priceStr = "variable price (by size/quality)";
       }
       const caps = [
         m.supports.t2i ? "t2i" : null,
         m.supports.edit ? "edit" : null,
+        m.supports.bg_remove ? "bg_remove" : null,
       ]
         .filter(Boolean)
         .join("+");

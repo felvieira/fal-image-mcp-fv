@@ -174,7 +174,22 @@ class SessionTracker {
   calls: CallRecord[] = [];
 
   record(model_id: string, mode: CostMode, num_images: number, result: CostResult) {
-    this.total += result.total_usd;
+    // Per-session spend cap: check BEFORE mutating state to avoid a
+    // check-after-act race under concurrent requests on the same warm
+    // serverless instance. Compute what the new total would be and only
+    // commit (push + add) if it stays within the cap. If it would exceed
+    // the cap, throw immediately without touching `total` or `calls` —
+    // since nothing was applied yet, there is nothing to roll back.
+    const cap = parseFloat(process.env.MAX_SESSION_USD ?? "");
+    const prospectiveTotal = this.total + result.total_usd;
+    if (!isNaN(cap) && prospectiveTotal > cap) {
+      throw new Error(
+        `Session spend cap reached ($${cap.toFixed(2)}). ` +
+        `Current session total: $${this.total.toFixed(4)}. ` +
+        `Set MAX_SESSION_USD env var higher or start a new session.`
+      );
+    }
+    this.total = prospectiveTotal;
     this.calls.push({
       ts: Date.now(),
       model_id,
@@ -183,17 +198,6 @@ class SessionTracker {
       cost_usd: result.total_usd,
       pricing_key: result.pricing_key,
     });
-    // Per-session spend cap: reject if MAX_SESSION_USD is set and exceeded
-    const cap = parseFloat(process.env.MAX_SESSION_USD ?? "");
-    if (!isNaN(cap) && this.total > cap) {
-      this.total -= result.total_usd;
-      this.calls.pop();
-      throw new Error(
-        `Session spend cap reached ($${cap.toFixed(2)}). ` +
-        `Current session total: $${this.total.toFixed(4)}. ` +
-        `Set MAX_SESSION_USD env var higher or start a new session.`
-      );
-    }
   }
 
   format(): string {

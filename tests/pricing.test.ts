@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { calculateCost, type CostInput } from "@/lib/pricing";
+import { describe, it, expect, afterEach } from "vitest";
+import { calculateCost, SessionTracker, getTracker, type CostInput, type CostResult } from "@/lib/pricing";
 import type { FavoriteModel } from "@/lib/models";
 import modelsJson from "@/models.json";
 
@@ -241,6 +241,30 @@ describe("calculateCost — per-megapixel pricing (flux-2-flash)", () => {
     expect(result.per_image_usd).toBeCloseTo(expectedPerImage, 8);
     expect(result.total_usd).toBeCloseTo(expectedPerImage * 4, 8);
   });
+
+  it("resolves 'square_hd' image_size enum to 1024x1024 via IMAGE_SIZE_ENUM_DIMS", () => {
+    const result = calculateCost({
+      model: flux2Flash,
+      mode: "t2i",
+      num_images: 1,
+      image_size: "square_hd",
+    });
+    const expectedPerImage = 0.005 * (1024 * 1024) / 1_000_000;
+    expect(result.per_image_usd).toBeCloseTo(expectedPerImage, 8);
+    expect(result.pricing_key).toBe("per_mp_1024x1024");
+  });
+
+  it("resolves 'landscape_4_3' image_size enum to 1024x768 via IMAGE_SIZE_ENUM_DIMS", () => {
+    const result = calculateCost({
+      model: flux2Flash,
+      mode: "t2i",
+      num_images: 1,
+      image_size: "landscape_4_3",
+    });
+    const expectedPerImage = 0.005 * (1024 * 768) / 1_000_000;
+    expect(result.per_image_usd).toBeCloseTo(expectedPerImage, 8);
+    expect(result.pricing_key).toBe("per_mp_1024x768");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -292,5 +316,148 @@ describe("calculateCost — background removal (pixelcut-bg-remove)", () => {
     expect(result.per_image_usd).toBe(0);
     expect(result.total_usd).toBe(0);
     expect(result.pricing_key).toBe("missing");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 11. SessionTracker — accumulation, spend cap, and the race-condition fix
+// ---------------------------------------------------------------------------
+// The cap check in `record()` must compute the prospective total BEFORE
+// mutating `total`/`calls`, and throw without touching state if the
+// prospective total would exceed MAX_SESSION_USD. These tests pin that
+// contract directly against the just-fixed implementation.
+// ---------------------------------------------------------------------------
+function makeCost(total_usd: number): CostResult {
+  return { per_image_usd: total_usd, total_usd, pricing_key: "fixed" };
+}
+
+describe("SessionTracker.record — accumulation", () => {
+  it("accumulates cost and call count across multiple calls", () => {
+    const tracker = new SessionTracker();
+    tracker.record("model-a", "t2i", 1, makeCost(0.05));
+    tracker.record("model-b", "edit", 2, makeCost(0.03));
+
+    expect(tracker.total).toBeCloseTo(0.08, 8);
+    expect(tracker.calls.length).toBe(2);
+    expect(tracker.calls[0].model_id).toBe("model-a");
+    expect(tracker.calls[1].model_id).toBe("model-b");
+  });
+});
+
+describe("SessionTracker.record — spend cap (MAX_SESSION_USD)", () => {
+  const ORIGINAL = process.env.MAX_SESSION_USD;
+
+  afterEach(() => {
+    if (ORIGINAL === undefined) delete process.env.MAX_SESSION_USD;
+    else process.env.MAX_SESSION_USD = ORIGINAL;
+  });
+
+  it("throws when a call would push the total past the cap", () => {
+    process.env.MAX_SESSION_USD = "0.10";
+    const tracker = new SessionTracker();
+    tracker.record("model-a", "t2i", 1, makeCost(0.05));
+
+    expect(() => tracker.record("model-b", "t2i", 1, makeCost(0.06))).toThrow(/spend cap/i);
+  });
+
+  it("does NOT mutate .total or .calls when the cap rejects a call", () => {
+    process.env.MAX_SESSION_USD = "0.10";
+    const tracker = new SessionTracker();
+    tracker.record("model-a", "t2i", 1, makeCost(0.05));
+
+    const totalBefore = tracker.total;
+    const callsLengthBefore = tracker.calls.length;
+
+    expect(() => tracker.record("model-b", "t2i", 1, makeCost(0.06))).toThrow();
+
+    // State must be left exactly as it was before the rejected call —
+    // this is the exact race-condition fix (check-before-act, no rollback needed).
+    expect(tracker.total).toBe(totalBefore);
+    expect(tracker.calls.length).toBe(callsLengthBefore);
+  });
+
+  it("succeeds for a call that lands exactly on the cap", () => {
+    process.env.MAX_SESSION_USD = "0.10";
+    const tracker = new SessionTracker();
+    tracker.record("model-a", "t2i", 1, makeCost(0.04));
+
+    // 0.04 + 0.06 = 0.10 exactly → prospectiveTotal > cap is false → must succeed
+    expect(() => tracker.record("model-b", "t2i", 1, makeCost(0.06))).not.toThrow();
+    expect(tracker.total).toBeCloseTo(0.10, 8);
+    expect(tracker.calls.length).toBe(2);
+  });
+
+  it("succeeds for calls within the cap and only rejects the one that exceeds it", () => {
+    process.env.MAX_SESSION_USD = "1.00";
+    const tracker = new SessionTracker();
+
+    tracker.record("model-a", "t2i", 1, makeCost(0.40));
+    tracker.record("model-b", "t2i", 1, makeCost(0.40));
+    expect(tracker.total).toBeCloseTo(0.80, 8);
+
+    // 0.80 + 0.30 = 1.10 > 1.00 → must reject
+    expect(() => tracker.record("model-c", "t2i", 1, makeCost(0.30))).toThrow(/spend cap/i);
+    expect(tracker.total).toBeCloseTo(0.80, 8);
+    expect(tracker.calls.length).toBe(2);
+  });
+
+  it("does not enforce a cap when MAX_SESSION_USD is unset/invalid", () => {
+    delete process.env.MAX_SESSION_USD;
+    const tracker = new SessionTracker();
+    expect(() => tracker.record("model-a", "t2i", 1, makeCost(999))).not.toThrow();
+    expect(tracker.total).toBe(999);
+  });
+});
+
+describe("SessionTracker.reset", () => {
+  it("clears total and calls", () => {
+    const tracker = new SessionTracker();
+    tracker.record("model-a", "t2i", 1, makeCost(0.05));
+    tracker.reset();
+    expect(tracker.total).toBe(0);
+    expect(tracker.calls).toEqual([]);
+  });
+});
+
+describe("SessionTracker.format", () => {
+  it("returns the 'no calls' message when empty", () => {
+    const tracker = new SessionTracker();
+    expect(tracker.format()).toMatch(/no calls recorded/i);
+  });
+
+  it("includes the total and call count when calls exist", () => {
+    const tracker = new SessionTracker();
+    tracker.record("model-a", "t2i", 1, makeCost(0.05));
+    tracker.record("model-b", "edit", 1, makeCost(0.03));
+
+    const text = tracker.format();
+    expect(text).toContain("$0.0800");
+    expect(text).toContain("2 calls");
+    expect(text).toContain("model-a");
+    expect(text).toContain("model-b");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 12. getTracker — per-session registry
+// ---------------------------------------------------------------------------
+describe("getTracker", () => {
+  it("returns the SAME instance for the same sessionId", () => {
+    const id = `session-${Math.random()}`;
+    const t1 = getTracker(id);
+    const t2 = getTracker(id);
+    expect(t1).toBe(t2);
+  });
+
+  it("returns a DIFFERENT instance for a different sessionId", () => {
+    const t1 = getTracker(`session-a-${Math.random()}`);
+    const t2 = getTracker(`session-b-${Math.random()}`);
+    expect(t1).not.toBe(t2);
+  });
+
+  it("state recorded via one call to getTracker(id) is visible via a second call with the same id", () => {
+    const id = `session-${Math.random()}`;
+    getTracker(id).record("model-a", "t2i", 1, makeCost(0.02));
+    expect(getTracker(id).total).toBeCloseTo(0.02, 8);
   });
 });
