@@ -17,4 +17,5 @@ next-env.d.ts
 .bot/
 .swarm/
 .claude/
+.serena/
 graphify-out/
