@@ -8,12 +8,23 @@ type Model = {
   pricing: {
     t2i_usd_per_image?: number | Record<string, number>;
     edit_usd_per_image?: number | Record<string, number>;
-    t2i_usd_per_megapixel?: number;
+    t2i_usd_per_megapixel?: number | { first_mp: number; extra_mp: number };
     bg_remove_usd_per_image?: number;
+    upscale_usd_per_megapixel?: number;
+    upscale_usd_per_compute_second?: number;
+    resize_usd_per_image?: number;
+    outpaint_usd_per_megapixel?: number | { first_mp: number; extra_mp: number };
     notes?: string;
   };
   use_cases: string[];
-  supports: { t2i: boolean; edit: boolean; bg_remove?: boolean };
+  supports: {
+    t2i: boolean;
+    edit: boolean;
+    bg_remove?: boolean;
+    upscale?: boolean;
+    resize?: boolean;
+    outpaint?: boolean;
+  };
 };
 
 const config = modelsJson as unknown as {
@@ -26,10 +37,22 @@ const config = modelsJson as unknown as {
 function priceLabel(m: Model): string {
   const mp = m.pricing.t2i_usd_per_megapixel;
   if (typeof mp === "number") return `$${mp.toFixed(4)}/MP`;
+  if (mp && typeof mp === "object") return `$${mp.first_mp.toFixed(3)}+/MP`;
   const flat = m.pricing.t2i_usd_per_image;
   if (typeof flat === "number") return `$${flat.toFixed(3)}/img`;
+  const editFlat = m.pricing.edit_usd_per_image;
+  if (typeof editFlat === "number") return `$${editFlat.toFixed(3)}/img`;
   const bgRemove = m.pricing.bg_remove_usd_per_image;
   if (typeof bgRemove === "number") return `$${bgRemove.toFixed(3)}/img`;
+  if (typeof m.pricing.upscale_usd_per_megapixel === "number") {
+    return `$${m.pricing.upscale_usd_per_megapixel.toFixed(3)}/MP up`;
+  }
+  if (m.pricing.upscale_usd_per_compute_second != null) return "compute-time";
+  if (typeof m.pricing.resize_usd_per_image === "number") {
+    return `$${m.pricing.resize_usd_per_image.toFixed(3)}/img`;
+  }
+  const out = m.pricing.outpaint_usd_per_megapixel;
+  if (out && typeof out === "object") return `$${out.first_mp.toFixed(3)}+/MP`;
   return "tiered";
 }
 
@@ -71,8 +94,8 @@ export default function Home() {
         <span style={s.accent}>Claude & Cursor</span>
       </h1>
       <p style={s.lead}>
-        One-click deploy → connect to any MCP client → generate images with 9 curated
-        fal.ai models, per-call cost tracking, and background removal.
+        One-click deploy → connect to any MCP client → generate, edit, upscale, resize,
+        and outpaint with curated fal.ai models plus per-call cost tracking.
         <br />
         Text-to-image from <strong style={{ color: "#ededed" }}>$0.002/image</strong>.
       </p>
@@ -93,9 +116,10 @@ export default function Home() {
         <h2 style={s.h2}>Features</h2>
         <div style={s.grid}>
           {[
-            ["9 curated models", "flux-2-flash, grok-imagine, gemini-25-flash, gpt-image-* — configured in models.json"],
+            ["19 curated models", "t2i, edit, bg-remove, upscale, resize, outpaint — synced from models.json"],
             ["Per-call cost tracking", "Every tool call reports the exact USD cost and the running session total."],
             ["Background removal", "Pixelcut integration with pre-flight transparency check — skips the call if the image is already transparent."],
+            ["Upscale / resize / outpaint", "clarity + ESRGAN upscalers, smart-resize to exact dims, flux-2-pro uncrop."],
             ["Dynamic catalog", "Search the full fal.ai public catalog for models outside the favorites list."],
             ["Secure by default", "Fail-closed Bearer auth, constant-time compare, anti-SSRF endpoint validation, per-session spend cap."],
             ["One-click deploy", "Vercel button — set two env vars and you're live in < 2 minutes."],
@@ -140,6 +164,9 @@ export default function Home() {
                     {m.supports.t2i && <span style={s.chipGreen}>t2i</span>}
                     {m.supports.edit && <span style={s.chip}>edit</span>}
                     {m.supports.bg_remove && <span style={s.chip}>bg-remove</span>}
+                    {m.supports.upscale && <span style={s.chip}>upscale</span>}
+                    {m.supports.resize && <span style={s.chip}>resize</span>}
+                    {m.supports.outpaint && <span style={s.chip}>outpaint</span>}
                   </td>
                   <td style={{ ...s.td, color: "#888", fontSize: 13 }}>{m.use_cases.slice(0, 2).join(", ")}</td>
                 </tr>
@@ -191,6 +218,9 @@ Header: Authorization: Bearer <your MCP_BEARER_TOKEN>`}</code></pre>
               ["fal_generate_image", "Text-to-image on any favorite or custom endpoint"],
               ["fal_edit_image", "Edit with 1+ reference images"],
               ["fal_remove_background", "Remove background → transparent PNG (Pixelcut). Skips already-transparent images."],
+              ["fal_upscale", "Upscale (clarity-upscaler / esrgan-upscale)"],
+              ["fal_resize", "Smart resize/recompose to exact width×height"],
+              ["fal_outpaint", "Expand/uncrop image borders (flux-2-pro-outpaint)"],
               ["fal_session_cost", "Accumulated cost + call history for this session"],
               ["fal_model_info", "Details (pricing, supports, defaults) for one favorite"],
             ].map(([tool, desc]) => (

@@ -1,10 +1,10 @@
 # fal-image-mcp-fv
 
-> Remote MCP server for fal.ai image models. Connect to Claude, Cursor, or any MCP client and generate images with curated models, per-call cost tracking, and background removal. Deploy to Vercel in one click.
+> Remote MCP server for fal.ai image models. Connect to Claude, Cursor, or any MCP client and generate, edit, upscale, resize, or outpaint images with curated models and per-call cost tracking. Deploy to Vercel in one click.
 
 ## What it is
 
-A Model Context Protocol (MCP) server that gives LLM clients (Claude, Cursor, Claude Code) the ability to generate and edit images using fal.ai's image models — including FLUX.2 Flash, Grok Imagine, Gemini 2.5 Flash, GPT-Image-1/1.5/2, and Gemini 3 Pro.
+A Model Context Protocol (MCP) server that gives LLM clients (Claude, Cursor, Claude Code) the ability to work with fal.ai image models — 19 curated favorites covering text-to-image, edit, background removal, upscale, smart resize, and outpaint.
 
 ## Tools exposed
 
@@ -12,6 +12,9 @@ A Model Context Protocol (MCP) server that gives LLM clients (Claude, Cursor, Cl
 - fal_generate_image: Generate an image from a text prompt using any favorite or custom fal endpoint
 - fal_edit_image: Edit an existing image using a text prompt and 1+ reference image URLs
 - fal_remove_background: Remove the background from an image, returning a transparent PNG (Pixelcut)
+- fal_upscale: Upscale an image (default clarity-upscaler; cheaper esrgan-upscale)
+- fal_resize: Smart resize/recompose to an exact width×height (default smart-resize)
+- fal_outpaint: Expand/uncrop image borders (default flux-2-pro-outpaint)
 - fal_session_cost: Show accumulated USD cost for the current session
 - fal_model_info: Show pricing, capabilities, and defaults for a specific favorite model
 

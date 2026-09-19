@@ -6,11 +6,11 @@ Remote **MCP server** for [fal.ai](https://fal.ai) image models. Connect it to C
 
 ## Features
 
-- **9 curated image models** ready to go (configurable in `models.json`): `flux-2-flash`, `grok-imagine`, `gemini-25-flash`, `gpt-image-1-mini`, `gpt-image-1.5`, `gpt-image-1`, `gpt-image-2`, `gemini-3-pro`, `pixelcut-bg-remove`
+- **19 curated image models** synced from the parent `image-generation/models.json` registry (t2i, edit, bg-remove, upscale, resize, outpaint)
 - **Dynamic catalog search** for any other fal.ai model
-- **Per-call cost calculation** — handles complex pricing tables (quality × size)
+- **Per-call cost calculation** — flat, per-MP, first/extra MP ladders, quality×size tables, resolution tiers
 - **Session cost accumulator** — see total spend per session
-- **Separate tools** for text-to-image and edit (filters compatible models)
+- **Separate tools** for generate / edit / bg-remove / upscale / resize / outpaint
 
 ## Stack
 
@@ -20,14 +20,17 @@ Remote **MCP server** for [fal.ai](https://fal.ai) image models. Connect it to C
 
 ## Exposed tools
 
-| Tool                  | What it does                                                  |
-| --------------------- | ------------------------------------------------------------- |
-| `fal_list_models`     | Lists favorites + (optional) fal catalog, filters by mode     |
-| `fal_generate_image`  | Text-to-image on any favorite or custom endpoint              |
-| `fal_edit_image`      | Edit with 1+ reference images                                 |
-| `fal_remove_background` | Remove background → transparent cutout (Pixelcut). Skips already-transparent images to save cost (`force` to override) |
-| `fal_session_cost`    | Accumulated cost + call history                               |
-| `fal_model_info`      | Details (pricing, supports, defaults) for one favorite        |
+| Tool                    | What it does                                                                 |
+| ----------------------- | ---------------------------------------------------------------------------- |
+| `fal_list_models`       | Lists favorites + (optional) fal catalog, filters by mode                    |
+| `fal_generate_image`    | Text-to-image on any favorite or custom endpoint                             |
+| `fal_edit_image`        | Edit with 1+ reference images                                                |
+| `fal_remove_background` | Remove background → transparent cutout (Pixelcut). Skips already-transparent |
+| `fal_upscale`           | Upscale (default `clarity-upscaler`; cheap alt `esrgan-upscale`)             |
+| `fal_resize`            | Smart resize/recompose to exact width×height (default `smart-resize`)        |
+| `fal_outpaint`          | Expand/uncrop image borders (default `flux-2-pro-outpaint`)                  |
+| `fal_session_cost`      | Accumulated cost + call history                                              |
+| `fal_model_info`        | Details (pricing, supports, defaults) for one favorite                       |
 
 ## Quick deploy (recommended)
 
@@ -119,6 +122,15 @@ claude mcp add --transport http fal-image \
 → Transparent PNG cutout · Cost: $0.0160 (session: $0.0940)
 → (if the image already looks transparent, it's skipped to save ~$0.016 — pass `force: true` to remove anyway)
 
+> "Upscale this product shot 2×"
+→ `fal_upscale({ image_url: "...", scale: 2 })`
+
+> "Resize this cover to exactly 1200×630"
+→ `fal_resize({ image_url: "...", width: 1200, height: 630 })`
+
+> "Expand this image 256px on each side"
+→ `fal_outpaint({ image_url: "...", expand_left_px: 256, expand_right_px: 256, expand_top_px: 256, expand_bottom_px: 256 })`
+
 > "How much have I spent so far?"
 → `fal_session_cost` → 💰 Total: $0.0940, 3 calls
 
@@ -127,7 +139,13 @@ claude mcp add --transport http fal-image \
 
 ## Updating the favorite models list
 
-Edit `models.json` in the repo root. After editing, redeploy:
+Prefer syncing from the parent registry (when developing inside `image-generation/`):
+
+```bash
+npm run sync:models
+```
+
+Or edit `models.json` directly in this repo, then redeploy:
 
 ```bash
 vercel --prod
@@ -138,11 +156,15 @@ vercel --prod
 `calculateCost` in `lib/pricing.ts` handles:
 
 1. **Fixed price** (number): `grok-imagine` → $0.020/img, `gemini-25-flash` → $0.039/img
-2. **Pricing table by quality × size** (object):
+2. **Per-megapixel** (number): `flux-2-flash` → $0.005/MP
+3. **Megapixel ladder** (`{first_mp, extra_mp}`): `flux-2-pro`, outpaint
+4. **Upscale / resize / bg_remove** dedicated modes
+5. **Pricing table by quality × size** (object):
    - Tries to match `{quality}_{width}x{height}` (e.g. `high_1024x1536`)
    - Falls back to `{quality}_1024` if size is 1024×1024
    - Falls back to `{quality}_other`
    - Returns 0 + note if nothing matches
+6. **Resolution tiers** via `pricing_table` (e.g. gemini-31-flash `1K`/`2K`/`4K`)
 
 Models with complex pricing: `gpt-image-1`, `gpt-image-1-mini`, `gpt-image-1.5`, `gpt-image-2`.
 

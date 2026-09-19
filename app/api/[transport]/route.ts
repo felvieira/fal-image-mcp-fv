@@ -8,7 +8,9 @@ import {
   getModel,
   listFavorites,
   formatFavoritesList,
+  maxReferenceImages,
   config as modelsConfig,
+  type ListMode,
 } from "@/lib/models";
 import { calculateCost, getTracker, type CostMode } from "@/lib/pricing";
 import { falSubscribe, extractImageUrls, listFalCatalog, assertValidEndpoint, isImageAlreadyTransparent, mimeFromUrl } from "@/lib/fal";
@@ -102,7 +104,8 @@ function recordAndFormatCost(
   modelDef: FavModel | null,
   mode: CostMode,
   num_images: number,
-  input: Record<string, unknown>
+  input: Record<string, unknown>,
+  dims?: { width?: number; height?: number; scale?: number }
 ): string {
   if (!modelDef) return "Cost: unavailable (model is outside the favorites list)";
   const cost = calculateCost({
@@ -111,6 +114,10 @@ function recordAndFormatCost(
     num_images,
     quality: typeof input.quality === "string" ? input.quality : undefined,
     image_size: typeof input.image_size === "string" ? input.image_size : undefined,
+    resolution: typeof input.resolution === "string" ? input.resolution : undefined,
+    width: dims?.width,
+    height: dims?.height,
+    scale: dims?.scale,
   });
   const tracker = currentTracker();
   tracker.record(modelDef.id, mode, num_images, cost);
@@ -119,6 +126,38 @@ function recordAndFormatCost(
     `($${cost.per_image_usd.toFixed(4)}/img × ${num_images}, key=${cost.pricing_key})\n` +
     `   Session: $${tracker.total.toFixed(4)} (${tracker.calls.length} calls)`
   );
+}
+
+/** Shared success payload for image-returning tools. */
+function imageToolResult(opts: {
+  headline: string;
+  modelLabel: string;
+  endpoint: string;
+  request_id: string;
+  costStr: string;
+  images: Array<{ url: string; mimeType: string }>;
+  extraLines?: string[];
+}) {
+  const extras = opts.extraLines?.length ? opts.extraLines.join("\n") + "\n" : "";
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text:
+          `${opts.headline}\n` +
+          `Model: ${opts.modelLabel}\n` +
+          `Endpoint: ${opts.endpoint}\n` +
+          extras +
+          `Request ID: ${opts.request_id}\n` +
+          opts.costStr +
+          `\n\nResult URLs:\n${opts.images.map((img, i) => `  ${i + 1}. ${img.url}`).join("\n")}`,
+      },
+      ...opts.images.map((img) => ({
+        type: "resource" as const,
+        resource: { uri: img.url, text: img.url, mimeType: img.mimeType },
+      })),
+    ],
+  };
 }
 
 // ============================================================
@@ -132,12 +171,12 @@ const handler = createMcpHandler(
     // -------------------------------------------------------
     server.tool(
       "fal_list_models",
-      "Lists the available image models. Shows the FAVORITES first (from the curated models.json), then optionally fetches more from the public fal.ai catalog. Filter by mode (t2i, edit, or all).",
+      "Lists the available image models. Shows the FAVORITES first (from the curated models.json), then optionally fetches more from the public fal.ai catalog. Filter by mode (t2i, edit, bg_remove, upscale, resize, outpaint, or all).",
       {
         mode: z
-          .enum(["t2i", "edit", "all"])
+          .enum(["t2i", "edit", "bg_remove", "upscale", "resize", "outpaint", "all"])
           .default("all")
-          .describe("Filter by capability: 't2i' = text-to-image only, 'edit' = image-to-image/edit only, 'all' = everything"),
+          .describe("Filter by capability"),
         include_fal_catalog: z
           .boolean()
           .default(false)
@@ -145,8 +184,9 @@ const handler = createMcpHandler(
         catalog_limit: z.number().min(1).max(50).default(15).describe("How many extra models to fetch from the fal catalog"),
       },
       async ({ mode, include_fal_catalog, catalog_limit }) => {
-        const favLines = formatFavoritesList(mode);
-        const favCount = listFavorites(mode).length;
+        const listMode = mode as ListMode;
+        const favLines = formatFavoritesList(listMode);
+        const favCount = listFavorites(listMode).length;
 
         let extras = "";
         if (include_fal_catalog) {
@@ -155,6 +195,8 @@ const handler = createMcpHandler(
               ? ["text-to-image"]
               : mode === "edit"
               ? ["image-to-image", "image-editing"]
+              : mode === "upscale"
+              ? ["image-to-image"]
               : ["text-to-image", "image-to-image", "image-editing"];
 
           const results = await Promise.all(cats.map((c) => listFalCatalog(c, catalog_limit)));
@@ -175,11 +217,13 @@ const handler = createMcpHandler(
               type: "text",
               text:
                 `⭐ FAVORITES (${favCount} models, mode=${mode}):\n` +
-                `Default: ${modelsConfig.default_text_to_image ?? DEFAULT_MODEL}\n\n` +
+                `Default t2i: ${modelsConfig.default_text_to_image ?? DEFAULT_MODEL}\n` +
+                `Default edit: ${modelsConfig.default_edit_image ?? "gemini-25-flash"}\n\n` +
                 favLines +
                 extras +
                 `\n\nTip: use 'use_case_routing' from models.json to pick quickly:\n` +
                 Object.entries(modelsConfig.use_case_routing)
+                  .filter(([k]) => !k.startsWith("_"))
                   .map(([k, v]) => `  • ${k} → ${v}`)
                   .join("\n"),
             },
@@ -332,9 +376,9 @@ const handler = createMcpHandler(
         assertValidEndpoint(endpoint);
 
         // ----- Validate the number of reference images -----
-        if (pricingModel?.supports.max_reference_images != null) {
-          const max = pricingModel.supports.max_reference_images;
-          if (args.image_urls.length > max) {
+        if (pricingModel) {
+          const max = maxReferenceImages(pricingModel);
+          if (max != null && args.image_urls.length > max) {
             throw new Error(
               `Model ${pricingModel.id} accepts at most ${max} reference image(s). You passed ${args.image_urls.length}.`
             );
@@ -504,6 +548,257 @@ const handler = createMcpHandler(
     );
 
     // -------------------------------------------------------
+    // TOOL 3c: Upscale
+    // -------------------------------------------------------
+    server.tool(
+      "fal_upscale",
+      "Upscales an image. Default: clarity-upscaler (high fidelity). Cheaper alternative: esrgan-upscale (billed by compute-time). ALWAYS reports the cost.",
+      {
+        image_url: z.string().url().describe("URL of the image to upscale"),
+        model_id: z
+          .string()
+          .optional()
+          .describe(
+            `Upscale model ID. Default: ${modelsConfig.use_case_routing?.upscale_alta_fidelidade ?? "clarity-upscaler"}. Alternatives: esrgan-upscale`
+          ),
+        endpoint_id: z.string().optional().describe("Arbitrary fal upscale endpoint. Overrides model_id."),
+        scale: z
+          .number()
+          .min(1)
+          .max(8)
+          .optional()
+          .describe("Scale factor (e.g. 2 = 2×). Mapped to model-specific param names when needed."),
+        width: z.number().int().positive().optional().describe("Target output width in px (when the model accepts it)"),
+        height: z.number().int().positive().optional().describe("Target output height in px (when the model accepts it)"),
+        extra_params: z.record(z.any()).optional().describe("Extra params passed straight into the fal request body."),
+      },
+      async (args) => {
+        let endpoint: string;
+        let modelLabel: string;
+        let pricingModel: FavModel | null = null;
+
+        if (args.endpoint_id) {
+          endpoint = args.endpoint_id;
+          modelLabel = `[custom] ${args.endpoint_id}`;
+        } else {
+          const id =
+            args.model_id ??
+            (modelsConfig.use_case_routing?.upscale_alta_fidelidade ?? "clarity-upscaler");
+          const m = getModel(id);
+          if (!m.supports.upscale || !m.endpoints.upscale) {
+            throw new Error(`Model ${id} does not support upscale.`);
+          }
+          endpoint = m.endpoints.upscale;
+          modelLabel = `${m.name} (${id})`;
+          pricingModel = m;
+        }
+
+        assertValidEndpoint(endpoint);
+
+        const input: Record<string, unknown> = { image_url: args.image_url };
+        if (pricingModel?.default_params) {
+          for (const [k, v] of Object.entries(pricingModel.default_params)) {
+            if (input[k] == null) input[k] = v;
+          }
+        }
+        if (args.scale != null) {
+          // fal models differ: clarity uses scale, esrgan uses scale / upscaling_factor
+          input.scale = args.scale;
+          input.upscaling_factor = args.scale;
+        }
+        if (args.width != null) input.width = args.width;
+        if (args.height != null) input.height = args.height;
+        if (args.extra_params) Object.assign(input, sanitizeExtraParams(args.extra_params));
+
+        const start = Date.now();
+        const { data, request_id } = await falSubscribe(endpoint, input);
+        const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+        const images = extractImageUrls(data);
+        const costStr = recordAndFormatCost(pricingModel, "upscale", 1, input, {
+          width: args.width,
+          height: args.height,
+          scale: args.scale,
+        });
+
+        return imageToolResult({
+          headline: `✅ Upscaled in ${elapsed}s`,
+          modelLabel,
+          endpoint,
+          request_id,
+          costStr,
+          images,
+        });
+      }
+    );
+
+    // -------------------------------------------------------
+    // TOOL 3d: Smart resize / recompose
+    // -------------------------------------------------------
+    server.tool(
+      "fal_resize",
+      "Resizes/recomposes an image to an exact width×height (vision-guided smart resize). Default: smart-resize. ALWAYS reports the cost.",
+      {
+        image_url: z.string().url().describe("URL of the image to resize"),
+        width: z.number().int().min(64).max(8192).describe("Target width in pixels"),
+        height: z.number().int().min(64).max(8192).describe("Target height in pixels"),
+        model_id: z
+          .string()
+          .optional()
+          .describe(
+            `Resize model ID. Default: ${modelsConfig.use_case_routing?.resize_recompor_dimensao ?? "smart-resize"}`
+          ),
+        endpoint_id: z.string().optional().describe("Arbitrary fal resize endpoint. Overrides model_id."),
+        extra_params: z.record(z.any()).optional().describe("Extra params passed straight into the fal request body."),
+      },
+      async (args) => {
+        let endpoint: string;
+        let modelLabel: string;
+        let pricingModel: FavModel | null = null;
+
+        if (args.endpoint_id) {
+          endpoint = args.endpoint_id;
+          modelLabel = `[custom] ${args.endpoint_id}`;
+        } else {
+          const id =
+            args.model_id ??
+            (modelsConfig.use_case_routing?.resize_recompor_dimensao ?? "smart-resize");
+          const m = getModel(id);
+          if (!m.supports.resize || !m.endpoints.resize) {
+            throw new Error(`Model ${id} does not support resize.`);
+          }
+          endpoint = m.endpoints.resize;
+          modelLabel = `${m.name} (${id})`;
+          pricingModel = m;
+        }
+
+        assertValidEndpoint(endpoint);
+
+        const input: Record<string, unknown> = {
+          image_url: args.image_url,
+          width: args.width,
+          height: args.height,
+        };
+        if (pricingModel?.default_params) {
+          for (const [k, v] of Object.entries(pricingModel.default_params)) {
+            if (input[k] == null) input[k] = v;
+          }
+        }
+        if (args.extra_params) Object.assign(input, sanitizeExtraParams(args.extra_params));
+
+        const start = Date.now();
+        const { data, request_id } = await falSubscribe(endpoint, input);
+        const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+        const images = extractImageUrls(data);
+        const costStr = recordAndFormatCost(pricingModel, "resize", 1, input, {
+          width: args.width,
+          height: args.height,
+        });
+
+        return imageToolResult({
+          headline: `✅ Resized to ${args.width}×${args.height} in ${elapsed}s`,
+          modelLabel,
+          endpoint,
+          request_id,
+          costStr,
+          images,
+        });
+      }
+    );
+
+    // -------------------------------------------------------
+    // TOOL 3e: Outpaint / uncrop
+    // -------------------------------------------------------
+    server.tool(
+      "fal_outpaint",
+      "Expands an image beyond its original borders (uncrop / outpaint). Default: flux-2-pro-outpaint. Pass expand_*_px for each side. ALWAYS reports the cost.",
+      {
+        image_url: z.string().url().describe("URL of the image to expand"),
+        expand_top_px: z.number().int().min(0).optional().describe("Pixels to expand upward"),
+        expand_bottom_px: z.number().int().min(0).optional().describe("Pixels to expand downward"),
+        expand_left_px: z.number().int().min(0).optional().describe("Pixels to expand left"),
+        expand_right_px: z.number().int().min(0).optional().describe("Pixels to expand right"),
+        prompt: z.string().optional().describe("Optional guidance for what should appear in the expanded region"),
+        model_id: z
+          .string()
+          .optional()
+          .describe(
+            `Outpaint model ID. Default: ${modelsConfig.use_case_routing?.expandir_imagem_uncrop ?? "flux-2-pro-outpaint"}`
+          ),
+        endpoint_id: z.string().optional().describe("Arbitrary fal outpaint endpoint. Overrides model_id."),
+        extra_params: z.record(z.any()).optional().describe("Extra params passed straight into the fal request body."),
+      },
+      async (args) => {
+        const top = args.expand_top_px ?? 0;
+        const bottom = args.expand_bottom_px ?? 0;
+        const left = args.expand_left_px ?? 0;
+        const right = args.expand_right_px ?? 0;
+        if (top + bottom + left + right === 0) {
+          throw new Error("Provide at least one expand_*_px > 0 (top/bottom/left/right).");
+        }
+
+        let endpoint: string;
+        let modelLabel: string;
+        let pricingModel: FavModel | null = null;
+
+        if (args.endpoint_id) {
+          endpoint = args.endpoint_id;
+          modelLabel = `[custom] ${args.endpoint_id}`;
+        } else {
+          const id =
+            args.model_id ??
+            (modelsConfig.use_case_routing?.expandir_imagem_uncrop ?? "flux-2-pro-outpaint");
+          const m = getModel(id);
+          if (!m.supports.outpaint || !m.endpoints.outpaint) {
+            throw new Error(`Model ${id} does not support outpaint.`);
+          }
+          endpoint = m.endpoints.outpaint;
+          modelLabel = `${m.name} (${id})`;
+          pricingModel = m;
+        }
+
+        assertValidEndpoint(endpoint);
+
+        const input: Record<string, unknown> = {
+          image_url: args.image_url,
+          expand_top_px: top,
+          expand_bottom_px: bottom,
+          expand_left_px: left,
+          expand_right_px: right,
+        };
+        if (args.prompt) input.prompt = args.prompt;
+        if (pricingModel?.default_params) {
+          for (const [k, v] of Object.entries(pricingModel.default_params)) {
+            if (input[k] == null) input[k] = v;
+          }
+        }
+        if (args.extra_params) Object.assign(input, sanitizeExtraParams(args.extra_params));
+
+        // Estimate output size for cost: assume 1024² source + expands
+        const estW = 1024 + left + right;
+        const estH = 1024 + top + bottom;
+
+        const start = Date.now();
+        const { data, request_id } = await falSubscribe(endpoint, input);
+        const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+        const images = extractImageUrls(data);
+        const costStr = recordAndFormatCost(pricingModel, "outpaint", 1, input, {
+          width: estW,
+          height: estH,
+        });
+
+        return imageToolResult({
+          headline: `✅ Outpainted in ${elapsed}s`,
+          modelLabel,
+          endpoint,
+          request_id,
+          costStr,
+          images,
+          extraLines: [`Expand: top=${top} bottom=${bottom} left=${left} right=${right}`],
+        });
+      }
+    );
+
+    // -------------------------------------------------------
     // TOOL 4: Accumulated session cost
     // -------------------------------------------------------
     server.tool(
@@ -526,15 +821,16 @@ const handler = createMcpHandler(
       },
       async ({ model_id }) => {
         const m = getModel(model_id);
+        const endpointLines = (["t2i", "edit", "bg_remove", "upscale", "resize", "outpaint"] as const).map(
+          (k) => (m.endpoints[k] ? `  • ${k}: ${m.endpoints[k]}` : `  • ${k}: ❌`)
+        );
         const lines = [
           `📌 ${m.name} (${m.vendor}) — tier ${m.tier}`,
           `ID: ${m.id}`,
           `Docs: ${m.docs}`,
           ``,
           `Endpoints:`,
-          m.endpoints.t2i ? `  • t2i: ${m.endpoints.t2i}` : `  • t2i: ❌`,
-          m.endpoints.edit ? `  • edit: ${m.endpoints.edit}` : `  • edit: ❌`,
-          m.endpoints.bg_remove ? `  • bg_remove: ${m.endpoints.bg_remove}` : `  • bg_remove: ❌`,
+          ...endpointLines,
           ``,
           `Use cases: ${m.use_cases.join(", ")}`,
           ``,

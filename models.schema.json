@@ -148,12 +148,28 @@
         "edit": {
           "type": "string",
           "description": "Endpoint path for image editing/refinement."
+        },
+        "bg_remove": {
+          "type": "string",
+          "description": "Endpoint path for background removal."
+        },
+        "upscale": {
+          "type": "string",
+          "description": "Endpoint path for upscaling."
+        },
+        "resize": {
+          "type": "string",
+          "description": "Endpoint path for smart resize / recompose."
+        },
+        "outpaint": {
+          "type": "string",
+          "description": "Endpoint path for outpaint / uncrop."
         }
       }
     },
     "ModelPricing": {
       "type": "object",
-      "description": "Pricing information. Fields may be a flat number per image, an object map of size/quality keys to numbers, or a per-megapixel rate.",
+      "description": "Pricing information. Fields may be a flat number per image, an object map of size/quality keys to numbers, a per-megapixel rate, or a first_mp/extra_mp ladder.",
       "additionalProperties": true,
       "properties": {
         "t2i_usd_per_image": {
@@ -177,12 +193,78 @@
           ]
         },
         "t2i_usd_per_megapixel": {
-          "type": "number",
-          "description": "Cost per megapixel for text-to-image (used by flux-style models)."
+          "description": "Cost per megapixel for text-to-image — flat number or {first_mp, extra_mp} ladder.",
+          "oneOf": [
+            { "type": "number" },
+            {
+              "type": "object",
+              "required": ["first_mp", "extra_mp"],
+              "additionalProperties": true,
+              "properties": {
+                "first_mp": { "type": "number" },
+                "extra_mp": { "type": "number" }
+              }
+            }
+          ]
         },
         "edit_usd_per_megapixel": {
+          "description": "Cost per megapixel for edit — flat number or {first_mp, extra_mp} ladder.",
+          "oneOf": [
+            { "type": "number" },
+            {
+              "type": "object",
+              "required": ["first_mp", "extra_mp"],
+              "additionalProperties": true,
+              "properties": {
+                "first_mp": { "type": "number" },
+                "extra_mp": { "type": "number" }
+              }
+            }
+          ]
+        },
+        "bg_remove_usd_per_image": {
           "type": "number",
-          "description": "Cost per megapixel for edit (used by flux-style models)."
+          "description": "Flat cost per background-removal call."
+        },
+        "resize_usd_per_image": {
+          "type": "number",
+          "description": "Flat cost per smart-resize call."
+        },
+        "resize_usd_per_image_4k": {
+          "type": "number",
+          "description": "Flat cost per smart-resize call at 4K."
+        },
+        "min_vision_fee_usd": {
+          "type": "number",
+          "description": "Minimum vision-analysis fee added to resize jobs."
+        },
+        "upscale_usd_per_megapixel": {
+          "type": "number",
+          "description": "Cost per output megapixel for upscalers."
+        },
+        "upscale_usd_per_compute_second": {
+          "type": "number",
+          "description": "Compute-time billing rate for upscalers (e.g. ESRGAN)."
+        },
+        "outpaint_usd_per_megapixel": {
+          "description": "Cost per megapixel for outpaint — flat number or {first_mp, extra_mp} ladder.",
+          "oneOf": [
+            { "type": "number" },
+            {
+              "type": "object",
+              "required": ["first_mp", "extra_mp"],
+              "additionalProperties": true,
+              "properties": {
+                "first_mp": { "type": "number" },
+                "extra_mp": { "type": "number" }
+              }
+            }
+          ]
+        },
+        "pricing_table": {
+          "type": "object",
+          "description": "Structured pricing by mode/quality/size/resolution.",
+          "additionalProperties": true
         },
         "examples": {
           "type": "object",

@@ -1,7 +1,7 @@
 {
   "name": "fal-image-mcp-fv",
-  "version": "0.3.0",
-  "description": "Remote MCP server for fal.ai image models — curated favorites, dynamic catalog search, per-call cost tracking",
+  "version": "0.4.0",
+  "description": "Remote MCP server for fal.ai image models — curated favorites, upscale/resize/outpaint, dynamic catalog search, per-call cost tracking",
   "license": "MIT",
   "author": "Felipe Vieira (@felvieira)",
   "repository": {
@@ -27,7 +27,8 @@
     "build": "next build",
     "start": "next start",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "sync:models": "node scripts/sync-models-from-parent.mjs"
   },
   "dependencies": {
     "@vercel/mcp-adapter": "^0.11.1",

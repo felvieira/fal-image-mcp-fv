@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { calculateCost, SessionTracker, getTracker, type CostInput, type CostResult } from "@/lib/pricing";
+import { calculateCost, SessionTracker, getTracker, roundUpMegapixels, type CostResult } from "@/lib/pricing";
 import type { FavoriteModel } from "@/lib/models";
 import modelsJson from "@/models.json";
 
@@ -9,11 +9,17 @@ import modelsJson from "@/models.json";
 const models = modelsJson.models as unknown as Record<string, FavoriteModel>;
 
 const gemini25Flash = models["gemini-25-flash"];   // flat $0.039
-const gptImage2     = models["gpt-image-2"];       // complex table, t2i only
+const gptImage2     = models["gpt-image-2"];       // complex table
 const gptImage1Mini = models["gpt-image-1-mini"];  // complex table with _1024 / _other keys
 const flux2Flash    = models["flux-2-flash"];       // per-megapixel
+const flux2Pro      = models["flux-2-pro"];         // first_mp/extra_mp ladder
 const grokImagine   = models["grok-imagine"];       // flat t2i + edit
 const pixelcutBg    = models["pixelcut-bg-remove"];  // flat bg_remove $0.016
+const clarity       = models["clarity-upscaler"];   // upscale $/MP
+const esrgan        = models["esrgan-upscale"];     // upscale compute-time
+const smartResize   = models["smart-resize"];       // resize flat (+ vision fee)
+const outpaint      = models["flux-2-pro-outpaint"]; // outpaint ladder
+const gemini31      = models["gemini-31-flash"];    // pricing_table by resolution
 
 // ---------------------------------------------------------------------------
 // 1. Fixed (flat) pricing — gemini-25-flash
@@ -316,6 +322,131 @@ describe("calculateCost — background removal (pixelcut-bg-remove)", () => {
     expect(result.per_image_usd).toBe(0);
     expect(result.total_usd).toBe(0);
     expect(result.pricing_key).toBe("missing");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 10b. Megapixel ladder (flux-2-pro) + roundUpMegapixels
+// ---------------------------------------------------------------------------
+describe("roundUpMegapixels", () => {
+  it("treats 1024x1024 (~1.05 MP) as 1 MP", () => {
+    expect(roundUpMegapixels(1024, 1024)).toBe(1);
+  });
+
+  it("ceils 1920x1080 (~2.07 MP) to 2 MP", () => {
+    expect(roundUpMegapixels(1920, 1080)).toBe(2);
+  });
+});
+
+describe("calculateCost — megapixel ladder (flux-2-pro)", () => {
+  it("charges first_mp only for ~1 MP", () => {
+    const result = calculateCost({
+      model: flux2Pro,
+      mode: "t2i",
+      num_images: 1,
+      width: 1024,
+      height: 1024,
+    });
+    expect(result.per_image_usd).toBeCloseTo(0.03, 6);
+    expect(result.pricing_key).toMatch(/^mp_ladder_/);
+  });
+
+  it("adds extra_mp for ~2 MP", () => {
+    const result = calculateCost({
+      model: flux2Pro,
+      mode: "t2i",
+      num_images: 1,
+      width: 1920,
+      height: 1080,
+    });
+    // 2 MP → 0.03 + 1*0.015 = 0.045
+    expect(result.per_image_usd).toBeCloseTo(0.045, 6);
+  });
+});
+
+describe("calculateCost — upscale / resize / outpaint", () => {
+  it("estimates clarity-upscaler at scale=2 of 1024² (~4 MP × $0.03)", () => {
+    const result = calculateCost({
+      model: clarity,
+      mode: "upscale",
+      num_images: 1,
+      scale: 2,
+    });
+    // 2048×2048 = 4.194304 MP × 0.03
+    expect(result.per_image_usd).toBeCloseTo(0.03 * ((2048 * 2048) / 1_000_000), 6);
+    expect(result.pricing_key).toMatch(/^upscale_mp_/);
+  });
+
+  it("marks esrgan as variable_compute (unknown until run)", () => {
+    const result = calculateCost({
+      model: esrgan,
+      mode: "upscale",
+      num_images: 1,
+    });
+    expect(result.pricing_key).toBe("variable_compute");
+    expect(result.total_usd).toBe(0);
+  });
+
+  it("prices smart-resize as flat + vision fee", () => {
+    const result = calculateCost({
+      model: smartResize,
+      mode: "resize",
+      num_images: 1,
+      width: 1280,
+      height: 720,
+    });
+    // 0.15 + 0.05 = 0.20
+    expect(result.per_image_usd).toBeCloseTo(0.20, 6);
+    expect(result.pricing_key).toBe("resize_fixed");
+  });
+
+  it("uses 4K resize price when max edge >= 3840", () => {
+    const result = calculateCost({
+      model: smartResize,
+      mode: "resize",
+      num_images: 1,
+      width: 3840,
+      height: 2160,
+    });
+    // 0.30 + 0.05 = 0.35
+    expect(result.per_image_usd).toBeCloseTo(0.35, 6);
+    expect(result.pricing_key).toBe("resize_4k");
+  });
+
+  it("prices outpaint with the first/extra MP ladder", () => {
+    const result = calculateCost({
+      model: outpaint,
+      mode: "outpaint",
+      num_images: 1,
+      width: 1024,
+      height: 1024,
+    });
+    expect(result.per_image_usd).toBeCloseTo(0.03, 6);
+    expect(result.pricing_key).toMatch(/^outpaint_ladder_/);
+  });
+});
+
+describe("calculateCost — pricing_table by resolution (gemini-31-flash)", () => {
+  it("resolves 1K tier from pricing_table", () => {
+    const result = calculateCost({
+      model: gemini31,
+      mode: "t2i",
+      num_images: 1,
+      resolution: "1K",
+    });
+    expect(result.per_image_usd).toBeCloseTo(0.08, 6);
+    expect(result.pricing_key).toBe("table_1K");
+  });
+
+  it("resolves 4K tier from pricing_table", () => {
+    const result = calculateCost({
+      model: gemini31,
+      mode: "edit",
+      num_images: 1,
+      resolution: "4K",
+    });
+    expect(result.per_image_usd).toBeCloseTo(0.16, 6);
+    expect(result.pricing_key).toBe("table_4K");
   });
 });
 

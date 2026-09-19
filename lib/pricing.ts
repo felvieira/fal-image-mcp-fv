@@ -1,24 +1,29 @@
-import { FavoriteModel } from "./models";
+import { FavoriteModel, type MegapixelLadder } from "./models";
 
 // ============================================================
 // Cost calculator
 // ============================================================
-// Handles models with fixed pricing (e.g. grok-imagine, gemini-25-flash)
-// and models with a quality × size pricing table (e.g. gpt-image-2).
+// Handles models with fixed pricing (e.g. grok-imagine, gemini-25-flash),
+// quality × size tables (gpt-image-*), per-megapixel rates, and
+// first_mp/extra_mp ladders (flux-2-pro / outpaint).
 // ============================================================
 
-export type CostMode = "t2i" | "edit" | "bg_remove";
+export type CostMode = "t2i" | "edit" | "bg_remove" | "upscale" | "resize" | "outpaint";
 
 export type CostInput = {
   model: FavoriteModel;
   mode: CostMode;
   num_images: number;
   quality?: string;       // "low" | "medium" | "high" | "auto"
-  image_size?: string;    // "1024x1024" | "1024x1536" | "1536x1024" | etc.
-  aspect_ratio?: string;  // "1:1" | "16:9" | etc.
+  image_size?: string;    // "1024x1024" | "square_hd" | etc.
+  aspect_ratio?: string;
+  /** Resolution tier for models like gemini-31-flash / gemini-3-pro ("1K","2K",…) */
+  resolution?: string;
   custom_size?: { width: number; height: number };
   width?: number;
   height?: number;
+  /** Output scale factor for upscalers (default 2) */
+  scale?: number;
 };
 
 export type CostResult = {
@@ -70,10 +75,15 @@ const IMAGE_SIZE_ENUM_DIMS: Record<string, [number, number]> = {
   portrait_16_9:  [576,  1024],
   landscape_4_3:  [1024, 768],
   landscape_16_9: [1024, 576],
+  square_1_1:     [1024, 1024],
+  landscape_4_3_alt: [1024, 768],
+  portrait_3_4:   [768, 1024],
+  portrait_9_16:  [576, 1024],
 };
 
 function resolveDims(input: CostInput): [number, number] {
   if (input.width && input.height) return [input.width, input.height];
+  if (input.custom_size) return [input.custom_size.width, input.custom_size.height];
   const sz = input.image_size;
   if (sz) {
     if (sz in IMAGE_SIZE_ENUM_DIMS) return IMAGE_SIZE_ENUM_DIMS[sz];
@@ -85,8 +95,46 @@ function resolveDims(input: CostInput): [number, number] {
   return [1024, 1024];
 }
 
+/**
+ * Round megapixels the way fal bills: standard presets near an integer
+ * (e.g. 1024x1024 = 1.048576 MP) count as that integer, not ceil.
+ */
+export function roundUpMegapixels(width: number, height: number, tolerance = 0.05): number {
+  const exact = (width * height) / 1_000_000;
+  const nearest = Math.round(exact);
+  if (nearest >= 1 && Math.abs(exact - nearest) <= tolerance * nearest) {
+    return nearest;
+  }
+  return Math.ceil(exact);
+}
+
+function isMegapixelLadder(v: unknown): v is MegapixelLadder {
+  return (
+    !!v &&
+    typeof v === "object" &&
+    typeof (v as MegapixelLadder).first_mp === "number" &&
+    typeof (v as MegapixelLadder).extra_mp === "number"
+  );
+}
+
+function costFromLadder(ladder: MegapixelLadder, width: number, height: number): number {
+  const mp = roundUpMegapixels(width, height);
+  const extra = Math.max(0, mp - 1);
+  return ladder.first_mp + extra * ladder.extra_mp;
+}
+
+function missing(model: FavoriteModel, mode: CostMode): CostResult {
+  return {
+    per_image_usd: 0,
+    total_usd: 0,
+    pricing_key: "missing",
+    notes: `Model ${model.id} has no pricing defined for mode ${mode}.`,
+  };
+}
+
 export function calculateCost(input: CostInput): CostResult {
   const { model, mode, num_images, quality, image_size } = input;
+  const [w, h] = resolveDims(input);
 
   if (mode === "bg_remove") {
     const flat = model.pricing.bg_remove_usd_per_image;
@@ -98,22 +146,86 @@ export function calculateCost(input: CostInput): CostResult {
         notes: model.pricing.notes,
       };
     }
+    return missing(model, mode);
+  }
+
+  if (mode === "resize") {
+    const is4k = Math.max(w, h) >= 3840;
+    const flat = is4k
+      ? (model.pricing.resize_usd_per_image_4k ?? model.pricing.resize_usd_per_image)
+      : model.pricing.resize_usd_per_image;
+    if (typeof flat !== "number") return missing(model, mode);
+    const vision = typeof model.pricing.min_vision_fee_usd === "number"
+      ? model.pricing.min_vision_fee_usd
+      : 0;
+    const per = flat + vision;
     return {
-      per_image_usd: 0,
-      total_usd: 0,
-      pricing_key: "missing",
-      notes: `Model ${model.id} has no pricing defined for background removal.`,
+      per_image_usd: per,
+      total_usd: per * num_images,
+      pricing_key: is4k ? "resize_4k" : "resize_fixed",
+      notes: model.pricing.notes,
     };
   }
 
-  // Per-megapixel pricing (e.g. flux-2-flash)
-  const mpPrice = (model.pricing as Record<string, unknown>)[
-    mode === "t2i" ? "t2i_usd_per_megapixel" : "edit_usd_per_megapixel"
-  ];
-  if (typeof mpPrice === "number") {
-    const [w, h] = resolveDims(input);
+  if (mode === "upscale") {
+    const compute = model.pricing.upscale_usd_per_compute_second;
+    if (typeof compute === "number") {
+      return {
+        per_image_usd: 0,
+        total_usd: 0,
+        pricing_key: "variable_compute",
+        notes:
+          model.pricing.notes ??
+          "Upscale billed by compute-time — cost unknown until the job finishes.",
+      };
+    }
+    const mpPrice = model.pricing.upscale_usd_per_megapixel;
+    if (typeof mpPrice === "number") {
+      // Prefer explicit output dims; otherwise assume scale× of a 1024² input.
+      const scale = input.scale && input.scale > 0 ? input.scale : 2;
+      const outW = input.width && input.height ? w : Math.round(1024 * scale);
+      const outH = input.width && input.height ? h : Math.round(1024 * scale);
+      const megapixels = (outW * outH) / 1_000_000;
+      const per = mpPrice * megapixels;
+      return {
+        per_image_usd: per,
+        total_usd: per * num_images,
+        pricing_key: `upscale_mp_${outW}x${outH}`,
+        notes: model.pricing.notes,
+      };
+    }
+    return missing(model, mode);
+  }
+
+  if (mode === "outpaint") {
+    const mp = model.pricing.outpaint_usd_per_megapixel;
+    if (isMegapixelLadder(mp)) {
+      const per = costFromLadder(mp, w, h);
+      return {
+        per_image_usd: per,
+        total_usd: per * num_images,
+        pricing_key: `outpaint_ladder_${w}x${h}`,
+        notes: model.pricing.notes,
+      };
+    }
+    if (typeof mp === "number") {
+      const megapixels = (w * h) / 1_000_000;
+      const per = mp * megapixels;
+      return {
+        per_image_usd: per,
+        total_usd: per * num_images,
+        pricing_key: `outpaint_mp_${w}x${h}`,
+        notes: model.pricing.notes,
+      };
+    }
+    return missing(model, mode);
+  }
+
+  // t2i / edit — per-megapixel (number or first/extra ladder)
+  const mpField = mode === "t2i" ? model.pricing.t2i_usd_per_megapixel : model.pricing.edit_usd_per_megapixel;
+  if (typeof mpField === "number") {
     const megapixels = (w * h) / 1_000_000;
-    const per_image_usd = mpPrice * megapixels;
+    const per_image_usd = mpField * megapixels;
     return {
       per_image_usd,
       total_usd: per_image_usd * num_images,
@@ -121,16 +233,43 @@ export function calculateCost(input: CostInput): CostResult {
       notes: model.pricing.notes,
     };
   }
+  if (isMegapixelLadder(mpField)) {
+    const per_image_usd = costFromLadder(mpField, w, h);
+    return {
+      per_image_usd,
+      total_usd: per_image_usd * num_images,
+      pricing_key: `mp_ladder_${w}x${h}`,
+      notes: model.pricing.notes,
+    };
+  }
+
+  // Structured pricing_table by resolution (gemini-31-flash / gemini-3-pro)
+  const tableRoot = model.pricing.pricing_table;
+  if (tableRoot && typeof tableRoot === "object") {
+    const modeTable = (tableRoot as Record<string, unknown>)[mode];
+    if (modeTable && typeof modeTable === "object") {
+      // Also accept resolution via image_size when it's a tier like "1K"
+      const tier =
+        input.resolution ??
+        (image_size && !image_size.includes("x") && !IMAGE_SIZE_ENUM_DIMS[image_size]
+          ? image_size
+          : undefined);
+      if (tier && typeof (modeTable as Record<string, unknown>)[tier] === "number") {
+        const price = (modeTable as Record<string, number>)[tier];
+        return {
+          per_image_usd: price,
+          total_usd: price * num_images,
+          pricing_key: `table_${tier}`,
+          notes: model.pricing.notes,
+        };
+      }
+    }
+  }
 
   const pricingField = mode === "t2i" ? model.pricing.t2i_usd_per_image : model.pricing.edit_usd_per_image;
 
   if (pricingField == null) {
-    return {
-      per_image_usd: 0,
-      total_usd: 0,
-      pricing_key: "missing",
-      notes: `Model ${model.id} has no pricing defined for mode ${mode}.`,
-    };
+    return missing(model, mode);
   }
 
   // Fixed flat price
